@@ -67,6 +67,8 @@ extern "C" {
 #define CMD_OTA_ABORT           0x13U
 #define CMD_OTA_AVAILABLE       0x14U  /* "update ready, please reboot" */
 #define CMD_APP_MSG             0x20U  /* passthrough data to application */
+#define CMD_SENSOR_DATA         0x21U  /* STM32 → ESP32: JSON telemetry */
+#define CMD_CONTROL_CMD         0x22U  /* ESP32 → STM32: JSON control */
 #define CMD_GET_STATUS          0x30U
 #define CMD_RESET               0x31U
 
@@ -76,6 +78,7 @@ extern "C" {
 #define CMD_NAK                 0x83U
 #define CMD_OTA_RESULT          0x84U
 #define CMD_STATUS_RSP          0x85U
+#define CMD_CONTROL_ACK         0x86U  /* STM32 → ESP32: control confirm */
 
 /*---------------------------------------------------------------------------
  * Error codes (in NAK / RSP_ERROR payloads)
