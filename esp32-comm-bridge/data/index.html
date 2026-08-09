@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>STM32 智能环境监测</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e0e0e0;
+    --dim: #6b7280;
+    --accent: #3b82f6;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --radius: 12px;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, 'Segoe UI', sans-serif;
+    min-height: 100vh;
+    padding: 16px;
+  }
+  .header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 16px; flex-wrap: wrap; gap: 8px;
+  }
+  .header h1 { font-size: 1.3rem; font-weight: 600; }
+  .status-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 6px;
+  }
+  .status-dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .status-dot.offline { background: var(--red); }
+  .badge {
+    font-size: 0.75rem; padding: 3px 10px; border-radius: 20px;
+    background: var(--border);
+  }
+  .badge.online { background: #064e3b; color: var(--green); }
+  .badge.offline { background: #450a0a; color: var(--red); }
+
+  /* Grid */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .card h3 {
+    font-size: 0.8rem; color: var(--dim); text-transform: uppercase;
+    letter-spacing: 0.5px; margin-bottom: 12px;
+  }
+  .card.span2 { grid-column: span 2; }
+
+  /* Gauges */
+  .gauge-row {
+    display: flex; justify-content: space-around; align-items: center;
+    flex-wrap: wrap; gap: 8px;
+  }
+  .gauge {
+    text-align: center; min-width: 70px;
+  }
+  .gauge .value {
+    font-size: 1.8rem; font-weight: 700; font-variant-numeric: tabular-nums;
+  }
+  .gauge .unit { font-size: 0.75rem; color: var(--dim); }
+  .gauge .label { font-size: 0.7rem; color: var(--dim); margin-top: 2px; }
+
+  /* Controls */
+  .control-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 0; border-bottom: 1px solid var(--border);
+  }
+  .control-row:last-child { border-bottom: none; }
+  .control-label { font-size: 0.9rem; }
+  .control-label small { display: block; color: var(--dim); font-size: 0.7rem; }
+
+  /* Toggle switch */
+  .toggle {
+    position: relative; display: inline-block; width: 48px; height: 26px;
+  }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle .slider {
+    position: absolute; cursor: pointer; top:0; left:0; right:0; bottom:0;
+    background: var(--border); border-radius: 26px; transition: 0.2s;
+  }
+  .toggle .slider::before {
+    content: ""; position: absolute; height: 20px; width: 20px;
+    left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.2s;
+  }
+  .toggle input:checked + .slider { background: var(--accent); }
+  .toggle input:checked + .slider::before { transform: translateX(22px); }
+
+  /* Slider */
+  input[type=range] {
+    width: 100px; accent-color: var(--accent);
+  }
+
+  /* Buttons */
+  .btn {
+    padding: 6px 16px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--card); color: var(--text); cursor: pointer; font-size: 0.8rem;
+    transition: 0.15s;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); }
+  .btn.danger { border-color: var(--red); color: var(--red); }
+
+  /* Chart container */
+  .chart-wrap { position: relative; height: 200px; }
+  .chart-wrap canvas { width: 100% !important; }
+
+  /* Event log */
+  .event-log {
+    max-height: 150px; overflow-y: auto; font-size: 0.75rem;
+    font-family: 'SF Mono', 'Cascadia Code', monospace; color: var(--dim);
+  }
+  .event-log div { padding: 3px 0; border-bottom: 1px solid #ffffff08; }
+  .event-log .event-motion { color: var(--yellow); }
+  .event-log .event-door { color: var(--accent); }
+
+  /* Responsive */
+  @media (max-width: 640px) {
+    .card.span2 { grid-column: span 1; }
+    .gauge .value { font-size: 1.4rem; }
+    .header h1 { font-size: 1.1rem; }
+  }
+
+  /* Tab bar */
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+  .tab {
+    padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    font-size: 0.8rem; border: 1px solid var(--border); background: transparent;
+    color: var(--dim);
+  }
+  .tab.active { background: var(--accent); color: white; border-color: var(--accent); }
+
+  /* OTA area */
+  .ota-zone {
+    border: 2px dashed var(--border); border-radius: var(--radius);
+    padding: 24px; text-align: center; margin-top: 12px;
+  }
+  .ota-zone.drag { border-color: var(--accent); background: #3b82f610; }
+  #otaProgress { height: 4px; background: var(--accent); width: 0; transition: width 0.1s; }
+
+  /* Section visibility */
+  .section { display: none; }
+  .section.active { display: block; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>🌡️ STM32 智能环境监测</h1>
+    <span id="connBadge" class="badge offline">
+      <span class="status-dot offline"></span>离线 (演示数据)
+    </span>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <span style="font-size:0.75rem;color:var(--dim);" id="clock"></span>
+    <span style="font-size:0.75rem;color:var(--dim);">FW v<span id="fwVer">-</span></span>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('dashboard')">仪表盘</div>
+  <div class="tab" onclick="switchTab('controls')">设备控制</div>
+  <div class="tab" onclick="switchTab('charts')">历史曲线</div>
+  <div class="tab" onclick="switchTab('settings')">OTA 升级</div>
+</div>
+
+<!-- DASHBOARD -->
+<div id="sec-dashboard" class="section active">
+  <div class="card">
+    <h3>🌡️ 环境数据</h3>
+    <div class="gauge-row">
+      <div class="gauge">
+        <div class="value" id="gTemp">--</div>
+        <div class="unit">°C</div><div class="label">温度</div>
+      </div>
+      <div class="gauge">
+        <div class="value" id="gHum">--</div>
+        <div class="unit">%</div><div class="label">湿度</div>
+      </div>
+      <div class="gauge">
+        <div class="value" id="gPres">--</div>
+        <div class="unit">hPa</div><div class="label">气压</div>
+      </div>
+      <div class="gauge">
+        <div class="value" id="gLux">--</div>
+        <div class="unit">lux</div><div class="label">光照</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>💨 空气质量 & 检测</h3>
+      <div class="gauge-row">
+        <div class="gauge">
+          <div class="value" id="gSmoke">--</div>
+          <div class="unit">ppm</div><div class="label">MQ-2 烟雾</div>
+        </div>
+        <div class="gauge">
+          <div class="value" id="gDist">--</div>
+          <div class="unit">cm</div><div class="label">超声波测距</div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>📐 姿态 & 距离</h3>
+      <div class="gauge-row">
+        <div class="gauge">
+          <div class="value" id="gAccel">--</div>
+          <div class="unit">g</div><div class="label">MPU6050 加速度</div>
+        </div>
+        <div class="gauge">
+          <div class="value" id="gToF">--</div>
+          <div class="unit">mm</div><div class="label">VL53L0X ToF</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>🔔 事件状态</h3>
+      <div class="control-row">
+        <span class="control-label">人体红外 (PIR)</span>
+        <span id="pirBadge" class="badge offline">无人</span>
+      </div>
+      <div class="control-row">
+        <span class="control-label">门窗 (对射红外)</span>
+        <span id="doorBadge" class="badge offline">闭合</span>
+      </div>
+      <div class="control-row">
+        <span class="control-label">编码器位置</span>
+        <span id="encVal" style="font-variant-numeric:tabular-nums;">0</span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>📋 事件日志</h3>
+      <div class="event-log" id="eventLog">
+        <div style="color:var(--dim)">等待数据...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CONTROLS -->
+<div id="sec-controls" class="section">
+  <div class="grid">
+    <div class="card">
+      <h3>🔌 继电器 / 开关</h3>
+      <div class="control-row">
+        <span class="control-label">继电器 1<small>风扇/灯</small></span>
+        <label class="toggle"><input type="checkbox" id="swRelay1" onchange="sendControl('relay1', this.checked)"><span class="slider"></span></label>
+      </div>
+      <div class="control-row">
+        <span class="control-label">继电器 2<small>加湿器电源</small></span>
+        <label class="toggle"><input type="checkbox" id="swRelay2" onchange="sendControl('relay2', this.checked)"><span class="slider"></span></label>
+      </div>
+      <div class="control-row">
+        <span class="control-label">雾化片<small>超声波出雾</small></span>
+        <label class="toggle"><input type="checkbox" id="swMist" onchange="sendControl('mist', this.checked)"><span class="slider"></span></label>
+      </div>
+      <div class="control-row">
+        <span class="control-label">蜂鸣器</span>
+        <button class="btn danger" onclick="beep()">🔊 测试响一声</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>🎯 舵机控制</h3>
+      <div style="text-align:center;">
+        <div style="font-size:2rem;font-weight:700;" id="servoAngle">90°</div>
+        <input type="range" min="0" max="180" value="90" id="servoSlider"
+               oninput="document.getElementById('servoAngle').textContent=this.value+'°'; sendControl('servo', parseInt(this.value))"
+               style="width:100%;margin:12px 0;">
+        <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--dim);">
+          <span>0°</span><span>90°</span><span>180°</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid" style="margin-top:12px;">
+    <div class="card">
+      <h3>⚙️ 自动模式阈值</h3>
+      <div class="control-row">
+        <span class="control-label">湿度下限<small>低于此值开加湿</small></span>
+        <input type="number" id="thHumLow" value="40" min="20" max="80" style="width:60px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;text-align:center;" onchange="sendThresholds()"> %
+      </div>
+      <div class="control-row">
+        <span class="control-label">湿度上限<small>高于此值关加湿</small></span>
+        <input type="number" id="thHumHigh" value="60" min="30" max="90" style="width:60px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;text-align:center;" onchange="sendThresholds()"> %
+      </div>
+      <div class="control-row">
+        <span class="control-label">温度上限<small>高于此值开风扇</small></span>
+        <input type="number" id="thTempHigh" value="30" min="20" max="45" style="width:60px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;text-align:center;" onchange="sendThresholds()"> °C
+      </div>
+      <div class="control-row">
+        <span class="control-label">模式</span>
+        <span>
+          <button class="btn primary" id="btnAuto" onclick="setMode('auto')">🤖 自动</button>
+          <button class="btn" id="btnManual" onclick="setMode('manual')">🖐 手动</button>
+        </span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CHARTS -->
+<div id="sec-charts" class="section">
+  <div class="card span2">
+    <h3>📈 温湿度趋势 (最近 5 分钟)</h3>
+    <div class="chart-wrap"><canvas id="chartEnv"></canvas></div>
+  </div>
+  <div class="grid" style="margin-top:12px;">
+    <div class="card">
+      <h3>💡 光照 & 气压</h3>
+      <div class="chart-wrap"><canvas id="chartLight"></canvas></div>
+    </div>
+    <div class="card">
+      <h3>💨 空气质量</h3>
+      <div class="chart-wrap"><canvas id="chartAir"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- OTA -->
+<div id="sec-settings" class="section">
+  <div class="card">
+    <h3>🔄 固件 OTA 升级</h3>
+    <p style="font-size:0.85rem;color:var(--dim);margin-bottom:12px;">
+      当前 STM32 固件: <strong id="otaFwVer">v-</strong>
+    </p>
+    <div class="ota-zone" id="otaZone"
+         ondragover="event.preventDefault(); this.classList.add('drag')"
+         ondragleave="this.classList.remove('drag')"
+         ondrop="handleDrop(event)">
+      <p style="color:var(--dim);">拖拽 .bin 固件文件到此处</p>
+      <p style="font-size:0.7rem;color:var(--dim);margin-top:4px;">或</p>
+      <input type="file" id="otaFileInput" accept=".bin" style="display:none"
+             onchange="handleFileSelect(event)">
+      <button class="btn" onclick="document.getElementById('otaFileInput').click()"
+              style="margin-top:8px;">📁 选择文件</button>
+    </div>
+    <div id="otaProgress" style="margin-top:12px;"></div>
+    <div id="otaStatus" style="font-size:0.8rem;margin-top:8px;color:var(--dim);"></div>
+  </div>
+</div>
+
+<script>
+// ===== CONFIG =====
+const WS_URL = 'ws://' + (location.hostname || '192.168.4.1') + ':81/ws';
+const HISTORY_LEN = 300; // 5 min at 1s intervals
+let ws = null;
+let connected = false;
+
+// ===== DATA STORE =====
+const history = { temp:[], hum:[], pres:[], lux:[], smoke:[], labels:[] };
+let latestData = {
+  temp:0, hum:0, pres:0, lux:0, smoke:0,
+  ax:0, ay:0, az:0, dist_tof:0, dist_us:0,
+  pir:0, door:0, encoder:0,
+  relay1:0, relay2:0, mist:0, buzz:0, servo:90,
+  fw_version:0
+};
+
+// ===== CHARTS =====
+function makeChart(id, label, color, dataArr) {
+  const ctx = document.getElementById(id).getContext('2d');
+  return new Chart(ctx, {
+    type:'line',
+    data:{ labels:history.labels, datasets:[{
+      label, data:dataArr, borderColor:color, backgroundColor:color+'20',
+      borderWidth:1.5, fill:true, pointRadius:0, tension:0.3
+    }]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      animation:false,
+      scales:{
+        x:{ display:false },
+        y:{ display:true, ticks:{color:'#6b7280',font:{size:10}}, grid:{color:'#ffffff08'} }
+      },
+      plugins:{ legend:{ labels:{color:'#6b7280',font:{size:10},boxWidth:12}} }
+    }
+  });
+}
+
+const chartEnv = makeChart('chartEnv', '温度 °C', '#ef4444', history.temp);
+// Add humidity on second axis
+chartEnv.data.datasets.push({
+  label:'湿度 %', data:history.hum, borderColor:'#3b82f6',
+  backgroundColor:'#3b82f620', borderWidth:1.5, fill:true, pointRadius:0, tension:0.3
+});
+chartEnv.update();
+
+const chartLight = makeChart('chartLight', '光照 lux', '#eab308', history.lux);
+chartLight.data.datasets.push({
+  label:'气压 hPa', data:history.pres, borderColor:'#22c55e',
+  backgroundColor:'#22c55e20', borderWidth:1.5, fill:true, pointRadius:0, tension:0.3
+});
+chartLight.update();
+
+const chartAir = makeChart('chartAir', 'MQ-2 ppm', '#f97316', history.smoke);
+
+// ===== UPDATE UI =====
+function updateUI(d) {
+  latestData = d;
+  // Gauges
+  document.getElementById('gTemp').textContent = d.temp.toFixed(1);
+  document.getElementById('gHum').textContent = d.hum.toFixed(1);
+  document.getElementById('gPres').textContent = d.pres.toFixed(1);
+  document.getElementById('gLux').textContent = d.lux.toFixed(0);
+  document.getElementById('gSmoke').textContent = d.smoke.toFixed(0);
+  document.getElementById('gDist').textContent = (d.dist_us || 0).toFixed(0);
+  document.getElementById('gAccel').textContent = Math.sqrt(d.ax*d.ax + d.ay*d.ay + d.az*d.az).toFixed(2);
+  document.getElementById('gToF').textContent = (d.dist_tof || 0).toFixed(0);
+  // Events
+  document.getElementById('pirBadge').textContent = d.pir ? '🚶 有人' : '无人';
+  document.getElementById('pirBadge').className = d.pir ? 'badge online' : 'badge offline';
+  document.getElementById('doorBadge').textContent = d.door ? '🚪 打开' : '闭合';
+  document.getElementById('doorBadge').className = d.door ? 'badge online' : 'badge offline';
+  document.getElementById('encVal').textContent = d.encoder || 0;
+  // Controls (sync without triggering onchange)
+  document.getElementById('swRelay1').checked = !!d.relay1;
+  document.getElementById('swRelay2').checked = !!d.relay2;
+  document.getElementById('swMist').checked = !!d.mist;
+  if (!document.getElementById('servoSlider').matches(':active')) {
+    document.getElementById('servoSlider').value = d.servo || 90;
+    document.getElementById('servoAngle').textContent = (d.servo || 90) + '°';
+  }
+  document.getElementById('fwVer').textContent = d.fw_version || '-';
+  document.getElementById('otaFwVer').textContent = 'v' + (d.fw_version || '-');
+
+  // History
+  const now = new Date().toLocaleTimeString();
+  history.labels.push(now);
+  history.temp.push(d.temp);
+  history.hum.push(d.hum);
+  history.pres.push(d.pres);
+  history.lux.push(d.lux);
+  history.smoke.push(d.smoke);
+  if (history.labels.length > HISTORY_LEN) {
+    history.labels.shift();
+    history.temp.shift(); history.hum.shift(); history.pres.shift();
+    history.lux.shift(); history.smoke.shift();
+  }
+  chartEnv.update();
+  chartLight.update();
+  chartAir.update();
+
+  // Event log
+  if (d.pir) addEvent('motion', '🚶 检测到人体移动');
+  if (d.door) addEvent('door', '🚪 门窗开启');
+}
+
+function addEvent(type, msg) {
+  const log = document.getElementById('eventLog');
+  const div = document.createElement('div');
+  div.className = 'event-' + type;
+  div.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+  log.prepend(div);
+  if (log.children.length > 50) log.lastChild.remove();
+}
+
+// ===== DEMO MODE =====
+function generateDemoData() {
+  const t = Date.now() / 1000;
+  return {
+    temp: 24 + 4*Math.sin(t/60),
+    hum: 50 + 15*Math.sin(t/120),
+    pres: 1013 + 5*Math.sin(t/180),
+    lux: 300 + 200*Math.sin(t/30),
+    smoke: 50 + 80*Math.max(0, Math.sin(t/45)),
+    ax: 0.02*Math.sin(t), ay: 0.02*Math.cos(t), az: 1.0,
+    dist_tof: 300 + 100*Math.sin(t/10),
+    dist_us: 150 + 50*Math.sin(t/8),
+    pir: Math.random() > 0.9 ? 1 : 0,
+    door: Math.random() > 0.95 ? 1 : 0,
+    encoder: Math.floor(Date.now()/1000 % 360),
+    relay1: 0, relay2: 1, mist: 0, buzz: 0, servo: 90,
+    fw_version: 3
+  };
+}
+
+// ===== WEBSOCKET =====
+function connectWS() {
+  try {
+    ws = new WebSocket(WS_URL);
+    ws.onopen = () => {
+      connected = true;
+      document.getElementById('connBadge').innerHTML = '<span class="status-dot online"></span>已连接';
+      document.getElementById('connBadge').className = 'badge online';
+    };
+    ws.onmessage = (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        updateUI(d);
+      } catch(err) {}
+    };
+    ws.onclose = () => {
+      connected = false;
+      document.getElementById('connBadge').innerHTML = '<span class="status-dot offline"></span>离线 (演示数据)';
+      document.getElementById('connBadge').className = 'badge offline';
+      setTimeout(connectWS, 3000);
+    };
+    ws.onerror = () => {};
+  } catch(e) {}
+}
+
+// ===== CONTROLS =====
+function sendControl(id, value) {
+  const msg = {};
+  if (id === 'servo') msg.servo = value;
+  else msg[id] = value ? 1 : 0;
+  if (connected && ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+  }
+  console.log('Control:', msg);
+}
+
+function beep() {
+  if (connected && ws) ws.send(JSON.stringify({buzzer: 1}));
+  setTimeout(() => { if (connected && ws) ws.send(JSON.stringify({buzzer: 0})); }, 500);
+}
+
+function sendThresholds() {
+  const t = {
+    hum_low: parseInt(document.getElementById('thHumLow').value),
+    hum_high: parseInt(document.getElementById('thHumHigh').value),
+    temp_high: parseInt(document.getElementById('thTempHigh').value)
+  };
+  if (connected && ws) ws.send(JSON.stringify({thresholds: t}));
+}
+
+function setMode(mode) {
+  document.getElementById('btnAuto').className = mode==='auto' ? 'btn primary' : 'btn';
+  document.getElementById('btnManual').className = mode==='manual' ? 'btn primary' : 'btn';
+  if (connected && ws) ws.send(JSON.stringify({mode}));
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('sec-'+name).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// ===== OTA =====
+function handleDrop(e) {
+  e.preventDefault();
+  e.target.classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if (file) sendOTA(file);
+}
+function handleFileSelect(e) {
+  const file = e.target.files[0];
+  if (file) sendOTA(file);
+}
+function sendOTA(file) {
+  if (!file.name.endsWith('.bin')) {
+    document.getElementById('otaStatus').textContent = '❌ 只支持 .bin 固件文件';
+    return;
+  }
+  document.getElementById('otaStatus').textContent = '⏳ 上传中...';
+  const reader = new FileReader();
+  reader.onload = function() {
+    document.getElementById('otaStatus').textContent =
+      '✅ ' + file.name + ' 已加载 (' + file.size + ' bytes)';
+    // In real implementation: send via WebSocket chunks or HTTP POST
+    if (connected && ws) {
+      ws.send(JSON.stringify({ota_begin: true, size: file.size, name: file.name}));
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+// ===== CLOCK =====
+function updateClock() {
+  document.getElementById('clock').textContent = new Date().toLocaleString('zh-CN');
+}
+
+// ===== INIT =====
+connectWS();
+updateClock();
+setInterval(updateClock, 1000);
+
+// Demo mode: generate mock data when offline
+setInterval(() => {
+  if (!connected) updateUI(generateDemoData());
+}, 1000);
+</script>
+</body>
+</html>
