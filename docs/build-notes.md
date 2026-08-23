@@ -160,7 +160,7 @@ pio run -d esp32-comm-bridge
 - [x] 用 iPhone 直连 ESP32 SoftAP，验证无需 PC 发包工具的 Web OTA
 - [x] 完成第一批本地外设：SSD1306、BH1750、AHT20、BMP280、HC-SR501、EC11
 - [x] 完成 PA2/PA3 两路继电器、PB1 蜂鸣器和 PB5 WS2812B 自动调光实机闭环
-- [ ] 用本阶段最终 Application 再做一次 Bluetooth/Web OTA 回归，记录版本、镜像大小和 CRC
+- [x] 最终 Application 的 Bluetooth/Web OTA 回归均通过；构建、版本回读与记录已由 `tools/ota_regression.py` 自动化，镜像数据和实机结果见 `docs/ota-regression-final.md`
 - [x] 定义 STM32→ESP32 传感器快照协议并提供 `/api/sensors` 实时状态页
 - [ ] 增加 `/ws` 推送与 Web 写控制接口
 - [ ] Pi5 继续使用现有 Mosquitto，接入 Node-RED + FlowFuse Dashboard 2.0，做可远程访问的实时曲线与状态卡片
