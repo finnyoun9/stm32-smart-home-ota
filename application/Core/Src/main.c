@@ -10,7 +10,6 @@
  *   vCommTask      — UART frame receive/send, protocol parsing
  *   vControlTask   — OTA trigger (writes config + resets), version reporting
  *   vAppTask       — Sensors, local UI, actuators, and WS2812B linkage
- *   vLedTask       — Status LED heartbeat
  *   vMonitorTask   — System health, stack/heap monitoring
  */
 
@@ -752,21 +751,6 @@ static void ui_status_build(UiStatus_t *status,
 }
 
 /*---------------------------------------------------------------------------
- * vLedTask — status LED
- *---------------------------------------------------------------------------*/
-
-static void vLedTask(void *pvParameters) {
-    (void)pvParameters;
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xPeriod = pdMS_TO_TICKS(500);
-
-    for (;;) {
-        HAL_GPIO_TogglePin(LED_PORT, LED_PIN);
-        vTaskDelayUntil(&xLastWakeTime, xPeriod);
-    }
-}
-
-/*---------------------------------------------------------------------------
  * vMonitorTask — system health monitoring
  *---------------------------------------------------------------------------*/
 
@@ -821,10 +805,6 @@ void app_tasks_init(void) {
 
     ret = xTaskCreate(vAppTask, "App", STACK_APP_TASK, NULL,
                       PRIO_APP_TASK, NULL);
-    configASSERT(ret == pdPASS);
-
-    ret = xTaskCreate(vLedTask, "Led", STACK_LED_TASK, NULL,
-                      PRIO_LED_TASK, NULL);
     configASSERT(ret == pdPASS);
 
     ret = xTaskCreate(vMonitorTask, "Monitor", STACK_MONITOR_TASK, NULL,

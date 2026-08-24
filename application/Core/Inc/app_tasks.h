@@ -15,7 +15,6 @@
 #define PRIO_COMM_TASK          (tskIDLE_PRIORITY + 3)
 #define PRIO_CONTROL_TASK       (tskIDLE_PRIORITY + 2)
 #define PRIO_APP_TASK           (tskIDLE_PRIORITY + 1)
-#define PRIO_LED_TASK           (tskIDLE_PRIORITY + 1)
 #define PRIO_MONITOR_TASK       (tskIDLE_PRIORITY + 1)
 
 /*---------------------------------------------------------------------------
@@ -25,7 +24,6 @@
 #define STACK_COMM_TASK         768U
 #define STACK_CONTROL_TASK      512U
 #define STACK_APP_TASK          768U
-#define STACK_LED_TASK          256U
 #define STACK_MONITOR_TASK      256U
 
 /*---------------------------------------------------------------------------
