@@ -7,6 +7,9 @@
 
 一个面向 MCU/RTOS 嵌入式研发岗位的智能硬件项目：STM32 负责实时采集与控制，ESP32 负责无线网关和本地 Web 控制，二者通过自定义 UART 协议协作。
 
+[![中文](https://img.shields.io/badge/语言-简体中文-2563eb?style=for-the-badge)](README.md)
+[![English](https://img.shields.io/badge/Language-English-334155?style=for-the-badge)](README_EN.md)
+
 [![Firmware CI](https://github.com/finnyoun9/stm32-smart-home-ota/actions/workflows/firmware.yml/badge.svg)](https://github.com/finnyoun9/stm32-smart-home-ota/actions/workflows/firmware.yml)
 ![STM32](https://img.shields.io/badge/MCU-STM32F103-03234B?logo=stmicroelectronics)
 ![FreeRTOS](https://img.shields.io/badge/RTOS-FreeRTOS-16A085)
