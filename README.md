@@ -1,51 +1,96 @@
-# STM32 Smart-Home OTA System / 智能环境监测与联动控制系统
+<div align="center">
 
-> **STM32F103 + FreeRTOS + ESP32**｜自定义 Bootloader｜Wi-Fi / Bluetooth OTA｜实机软硬件联调
+# STM32 Smart-Home OTA System
+### 智能环境监测与联动控制系统
+
+**STM32F103 + FreeRTOS + ESP32**｜自定义 Bootloader｜Wi-Fi / Bluetooth OTA｜实机软硬件联调
 
 一个面向 MCU/RTOS 嵌入式研发岗位的智能硬件项目：STM32 负责实时采集与控制，ESP32 负责无线网关和本地 Web 控制，二者通过自定义 UART 协议协作。
 
+[![中文](https://img.shields.io/badge/语言-简体中文-2563eb?style=for-the-badge)](README.md)
+[![English](https://img.shields.io/badge/Language-English-334155?style=for-the-badge)](README_EN.md)
+
+[![Firmware CI](https://github.com/finnyoun9/stm32-smart-home-ota/actions/workflows/firmware.yml/badge.svg)](https://github.com/finnyoun9/stm32-smart-home-ota/actions/workflows/firmware.yml)
+![STM32](https://img.shields.io/badge/MCU-STM32F103-03234B?logo=stmicroelectronics)
+![FreeRTOS](https://img.shields.io/badge/RTOS-FreeRTOS-16A085)
+![ESP32](https://img.shields.io/badge/Gateway-ESP32-E7352C?logo=espressif)
+![OTA](https://img.shields.io/badge/OTA-Bluetooth_%2F_Web-2563eb)
+
+<img src="docs/photos/breadboard-dev-progress-2.jpg" alt="面包板开发过程实拍" width="70%">
+
+<sub>面包板开发阶段实拍 · 非最终装配状态 · 最终整机实物图待补</sub>
+
+</div>
+
 > **Repository rename (2026-08-17):** `bluepill-ota-bootloader` → `stm32-smart-home-ota`。旧名称只强调 Bootloader；新名称准确反映系统包含 FreeRTOS、传感器/执行器、ESP32 网关和 OTA。旧 GitHub 链接会自动重定向。
 
-## Verified on hardware / 已实机验证
+## 导航
 
-- 8 KB STM32 自定义 Bootloader；Application 从 `0x08002000` 运行，支持向量表重定位和 CRC-32 校验。
-- ESP32 通过蓝牙或手机 Web 暂存固件，再经 UART 分块下发至 STM32；真实硬件 OTA 已闭环。
-- FreeRTOS 5 任务架构（通信、控制、应用、监控、状态灯），集成队列、事件组、StreamBuffer、IWDG 和异常 Hook。
-- AHT20/BMP280、BH1750、OLED、PIR、继电器、蜂鸣器和 WS2812B 已接入；BH1750 → WS2812B 自动调光已实机验证。
-- ESP32 实时 Web 仪表盘和 `GET /api/sensors` 已回归；使用逻辑分析仪以 WS2812B DOUT 为证据定位并校准时序问题。
+[为什么做这个项目](#为什么做这个项目--why-this-project) · [当前进度](#当前进度--status) · [系统架构](#系统架构--system-architecture) · [技术栈](#技术栈) · [硬件实物](#硬件实物--hardware-photos) · [快速开始](#快速开始) · [最大的难点](#项目最大的难点--biggest-technical-challenge) · [AI 辅助开发](#ai-辅助开发--ai-assisted-development) · [面试怎么讲](#面试怎么讲这个项目--how-to-talk-about-this-in-interviews) · [文档索引](#文档索引)
 
-![实时 Web 仪表盘实机截图](docs/images/web-realtime-dashboard-live.png)
+## 为什么做这个项目 / Why this project
 
-## Evidence boundary / 证据边界
+之前做的是 Web/后端方向（Node/TS），这个项目是转向 STM32/MCU 嵌入式方向求职时刻意设计的能力证明项目——按招聘 JD 里高频出现的能力反推范围：从零写 Bootloader、FreeRTOS 多任务划分、无线网关（ESP32）、自定义通信协议 + 真实硬件 OTA、多传感器/执行器集成、软硬件联调排障，而不是抄一个现成教程跑起来。完整的项目组合规划见 [docs/resume-roadmap.md](docs/resume-roadmap.md)：另有一块 STM32F407VET6 最小系统板项目补原理图/PCB/焊接/Bring-up 这条硬件设计链路，两者合起来覆盖“固件系统集成”和“硬件设计到实物验证”两条能力线。
 
-`MQTT`、WebSocket、部分传感器和新版 TFT/网页同步仍在开发或待回归，**不作为已完成能力**。完整的已验证/待验证记录见 [CHANGELOG.md](CHANGELOG.md)，求职版本收口计划见 [docs/resume-roadmap.md](docs/resume-roadmap.md)。
+## 当前进度 / Status
 
-## System architecture / 系统架构
+| 子系统 | 状态 | 证据边界 |
+| --- | --- | --- |
+| 8 KB 自定义 Bootloader + VTOR 重定位 + CRC-32 | **已真机验证** | Application 从 `0x08002000` 正确回跳运行 |
+| 蓝牙 / 手机 Web OTA 双入口 | **已真机验证** | `tools/ota_regression.py` 自动化回归：蓝牙路径 `VERSION=3` PASS，Web 路径 `VERSION=4` PASS |
+| FreeRTOS 4 任务架构（通信/控制/应用/监控） | **已真机验证** | 已移除独立状态灯任务（PC13 心跳），逻辑并入现有任务 |
+| 多传感器（AHT20/BMP280/BH1750/SSD1306/HC-SR501） | **已真机验证** | I2C1 共 4 地址稳定工作，OLED 菜单可操作 |
+| 双路继电器 + 有源蜂鸣器 | **已真机验证** | PA2/PA3/PB1，蓝牙与 Web 均可控制 |
+| WS2812B 自动调光 | **已真机验证** | 逻辑分析仪 DOUT 证据，见[最大的难点](#项目最大的难点--biggest-technical-challenge) |
+| ESP32 Web 仪表盘 + `GET /api/sensors` | **已真机验证** | 1 秒刷新，18B 定点快照 |
+| Firmware CI（GitHub Actions） | **已跑通** | 三端固件构建 + 协议烟测自动执行 |
+| MQTT（公共 EMQX 沙盒 broker） | **代码完成，待实机验证** | 编译通过，尚未接实机确认收发 |
+| ST7789 TFT 新版菜单/中英文切换 | **待实机验证** | 构建通过，未完成完整回归 |
 
-```
-传感器层 (STM32)          网关层 (ESP32)           控制层
-┌─────────────────┐    ┌─────────────────┐    ┌──────────────┐
-│ I2C×2 (6设备)   │    │ WebSocket 推送  │    │ Web 仪表盘   │
-│ 1-Wire (DHT11)  │───►│ HTTP REST API   │───►│ 手机浏览器   │
-│ ADC (MQ-2)      │    │ MQTT 上云       │    │ 蓝牙终端     │
-│ Timer Encoder   │    │ 蓝牙 SPP        │    │ Python 桌面  │
-│ PWM (舵机)      │    │ OTA 固件管理    │    └──────────────┘
-│ GPIO 中断       │    └─────────────────┘
-│ 继电器/蜂鸣器   │
-└─────────────────┘
-     ▲
-     │ UART 自定义协议 (CRC-32)
-     │
-┌─────────────────┐
-│  Bootloader 8KB │ ← OTA 固件升级
-└─────────────────┘
+完整的已验证/待验证记录见 [CHANGELOG.md](CHANGELOG.md)，求职版本收口计划见 [docs/resume-roadmap.md](docs/resume-roadmap.md)。`WebSocket` 和部分规划传感器（MPU6050/VL53L0X/DHT11/MQ-2/HC-SR04）仍是目标架构，**不作为已完成能力**。
+
+<img src="docs/images/web-realtime-dashboard-live.png" alt="实时 Web 仪表盘实机截图" width="70%">
+
+## 系统架构 / System architecture
+
+```mermaid
+flowchart LR
+    subgraph MCU[STM32F103 · FreeRTOS]
+        I2C[I2C1 ×4 设备<br/>AHT20/BMP280/BH1750/OLED]
+        GPIO[GPIO/EXTI<br/>EC11 · PIR · 继电器 · 蜂鸣器 · WS2812B]
+        BOOT[8KB Bootloader<br/>VTOR + CRC-32]
+    end
+
+    subgraph GW[ESP32 网关]
+        REST[HTTP REST API<br/>GET /api/sensors]
+        BT[蓝牙 SPP]
+        MQTT[MQTT 客户端<br/>待实机验证]
+        OTAMGR[OTA 固件管理]
+    end
+
+    subgraph CTRL[控制入口]
+        WEB[手机/PC Web 仪表盘]
+        BTC[蓝牙终端]
+        PY[Python 桌面工具]
+    end
+
+    I2C --> MCU
+    GPIO --> MCU
+    MCU <-->|UART 自定义协议 · CRC-32 · 115200 baud| GW
+    BOOT -.->|OTA 固件升级| MCU
+    GW --> REST --> WEB
+    GW --> BT --> BTC
+    GW --> OTAMGR
+    OTAMGR --> PY
+    GW -.-> MQTT
 ```
 
 ## 技术栈
 
 ### STM32 (C, FreeRTOS)
+
 - **Bootloader**: 8KB 裸机，Flash 分区管理，`.ramfunc` RAM 执行，CRC-32 校验，OTA 状态机
-- **FreeRTOS**: 当前 5 任务架构（Comm/Control/App/Monitor/Led）；`AppTask` 已整合本地传感器采集、PIR 状态和 OLED 菜单
+- **FreeRTOS**: 当前 4 任务架构（Comm/Control/App/Monitor）；`AppTask` 整合本地传感器采集、PIR 状态和 OLED 菜单
 - **当前外设**:
   - I2C1 100kHz 多设备总线：SSD1306、BH1750、AHT20、BMP280
   - GPIO/EXTI：EC11 四状态解码、独立确认按键、HC-SR501 输入
@@ -61,6 +106,7 @@
   - GPIO 外部中断（PIR 人体检测 + 对射红外门窗检测）
 
 ### ESP32 (C++, ESP-IDF)
+
 - 蓝牙 Classic SPP 服务器（手机直连控制）
 - WiFi SoftAP + 手机 Web OTA（已实机验证）
 - STM32 传感器快照轮询 + `GET /api/sensors` 实时缓存接口（实机通过）
@@ -70,12 +116,11 @@
 - WebSocket（后续规划）
 
 ### 控制接口
+
 - **手机 Web OTA**: ESP32 内置响应式页面，iPhone 可直接上传 `.bin`
 - **Web 仪表盘**: ESP32 内置纯 HTML/CSS/JS SPA，实时状态已接入；写控制与历史曲线待扩展
 - **蓝牙终端**: Windows/Android Classic SPP 文本命令（iPhone 不支持 SPP）
-- **Python 桌面**: `ota_sender.py` 固件上传 + `control_panel.py` 控制面板
-
-![实时 Web 仪表盘实机截图](docs/images/web-realtime-dashboard-live.png)
+- **Python 桌面**: `ota_sender.py` 固件上传 + `control_panel.py` 控制面板 + `ota_regression.py` 自动化 OTA 回归
 
 ## 传感器进度
 
@@ -137,6 +182,23 @@ PA0      (TIM2_CH1) ──────── SG90 舵机
 PA5      (ADC) ───────────── MQ-2 烟雾 (经1k/2k分压)
 ```
 
+### 硬件实物 / Hardware photos
+
+<details>
+<summary><strong>展开面包板开发过程实拍</strong></summary>
+
+| 早期搭建（ESP32 + STM32 + EC11 + BH1750 + OLED） | 早期搭建（含 PIR + 逻辑分析仪接线） |
+| --- | --- |
+| ![面包板开发过程图 1](docs/photos/breadboard-dev-progress-1.jpg) | ![面包板开发过程图 2](docs/photos/breadboard-dev-progress-2.jpg) |
+
+| 整体接线（含 ST7789 TFT） | OLED 中文乱码修复前后对比 |
+| --- | --- |
+| ![面包板整体接线实拍](docs/photos/breadboard-overview-2026-08-17.jpg) | ![OLED UTF-8 修复前后对比](docs/photos/oled-utf8-fix-tft-vs-ssd1306-2026-08-17.jpg) |
+
+以上均为开发过程中的接线状态，**不是最终成品**；最终装配完成后的整机实物图会补充到这里。完整说明见 [docs/photos/README.md](docs/photos/README.md)。
+
+</details>
+
 ## 快速开始
 
 ### 工具链
@@ -168,9 +230,9 @@ pio device monitor -p COM6 -b 115200
 
 # 在 monitor 中输入 STATUS 或 VERSION 并按 Enter
 
-# 端到端蓝牙 OTA（先刷写本次 Bootloader、Application 和 ESP32 固件）
-C:\Users\yyfxy\AppData\Local\Programs\Python\Python311\python.exe `
-  tools\bridge_ota.py COM6 .pio\build\app\firmware.bin --version 1
+# 自动化 OTA 回归（蓝牙 + Web 两条路径，含版本回读校验）
+py -3.11 tools/ota_regression.py bluetooth --port COM6
+py -3.11 tools/ota_regression.py web --base-url http://192.168.4.1 --verify-port COM6
 
 # 手机 Web OTA：连接 ESP32 热点后访问
 # SSID: STM32-OTA-Bridge / Password: stm32ota
@@ -180,7 +242,8 @@ C:\Users\yyfxy\AppData\Local\Programs\Python\Python311\python.exe `
 curl.exe http://192.168.4.1/api/sensors
 ```
 
-## 手机 Web OTA
+<details>
+<summary><strong>展开手机 Web OTA 完整流程</strong></summary>
 
 1. 手机连接 ESP32 热点 `STM32-OTA-Bridge`，密码 `stm32ota`
 2. Safari/浏览器打开 `http://192.168.4.1`
@@ -193,7 +256,10 @@ OTA 页通过 `POST /api/upload?version=<N>` 上传固件，ESP32 检查 54KB �
 
 > Web OTA 只接受链接到 `0x08002000` 的 STM32 Application 镜像。Bootloader 或其他目标生成的 `.bin` 会被向量表检查拒绝。
 
-## 蓝牙命令
+</details>
+
+<details>
+<summary><strong>展开蓝牙命令参考</strong></summary>
 
 连接 ESP32 蓝牙 SPP 服务 `STM32-OTA-Bridge`（手机用 "Serial Bluetooth Terminal"）：
 
@@ -216,12 +282,51 @@ OTA 页通过 `POST /api/upload?version=<N>` 上传固件，ESP32 检查 54KB �
 | `BUZZER ON/OFF` | 控制 PB1 低电平触发的有源蜂鸣器 |
 
 > Web 控制页已接入 `POST /api/control`。当前可控制灯带电源（Relay 2 / NO2）和蜂鸣器；灯带亮度仍由 BH1750 自动映射，网页亮度滑块暂未启用。
-
+>
 > 雾化驱动板曾在未连接雾化片时直接上电并损坏，加湿器现已从固件自动联动和 Web 控制中移除。更换模块后必须先按新模块说明接好雾化片与水位条件，再给驱动板上电。
-
+>
 > `tools/bridge_ota.py` 会自动计算 `<size>` 和 CRC，把固件编码为带偏移量 ACK 的 Base64 分块，执行 `VERIFY` 后再发送 `SEND`。不要在普通串口终端里手工粘贴二进制 `.bin`。
 
-## 目录结构
+</details>
+
+## 项目最大的难点 / Biggest technical challenge
+
+**主线难点：WS2812B 灯带联调。** 最初用 SPI1 4MHz + 5-bit 编码产生 WS2812B 时序，逻辑分析仪在 `DIN` 端测得的波形（脉宽、bit 数）看起来完全正常，但灯带没有任何反应。如果只信发送端“看起来对”，这个 bug 会一直定位不到——真正的判据是链路下一级的证据：把探头搭在第一颗灯珠的 `DOUT` 上，发现根本没有转发信号，说明灯珠没能正确解码 SPI 产生的那种时序（SPI 时钟域和 WS2812B 单总线时序协议在边界条件上不匹配）。换成在 64MHz 主频下用 GPIO bit-bang 手写时序后，`DOUT` 才捕获到后 14 颗共 336 bit、42 字节的有效转发帧，链路才算真正闭环。这次教训之后固化成排障习惯：不信“发送端看起来对”，只认“接收端/下一级看得到”的证据——README 和 CHANGELOG.md 里“已验证 / 规划中”的证据边界规则，本质上是从这里延伸出来的。对照证据保留在 [docs/captures/](docs/captures/README.md)：`spi-din-not-accepted.vcd`（旧方案 DIN 输入）与 `bitbang-dout-confirmed.vcd`（最终方案 DOUT 输出）。
+
+**次要难点（更适合聊架构取舍）：** STM32F103 只有 64KB 单 Bank Flash，Bootloader 占 8KB、Application 占 54KB，没有预留 A/B 分区空间，导致 OTA 传输中途掉电会让旧固件立即失效（Bootloader 收到第一个 chunk 就擦除含中断向量表的第 0 页，详见下方“已知限制”）。这是芯片选型和 Flash 预算下的真实取舍，面试时可以直接讲清楚是资源约束下的工程决策，而不是回避这个问题。
+
+## AI 辅助开发 / AI-assisted development
+
+这个项目从头到尾用 Claude Code / Codex 做协作开发，边界写清楚，不夸大也不藏着：
+
+- **代码生成与重构**：STM32 驱动骨架、UART 自定义协议解析、ESP32 端 REST API 和 Web 仪表盘前端（HTML/CSS/JS）等大量初稿由 AI 生成，我负责改成符合实际引脚/时序的版本并上机验证。
+- **调试辅助**：把逻辑分析仪波形描述、串口日志、错误现象喂给 AI，让它列可能原因（比如 WS2812B 第一颗灯珠 `DOUT` 无输出的几种可能、CRC 查表里 4 个错误常量怎么定位），我按假设逐条上机排除——AI 帮助收窄范围，不负责下最终结论。
+- **工程文档与项目管理**：[docs/agent-handoff.md](docs/agent-handoff.md)、[docs/resume-roadmap.md](docs/resume-roadmap.md)、[CHANGELOG.md](CHANGELOG.md) 里“已验证/规划中”的证据分离规则，由 AI 主导编写和持续维护，相当于把 AI 当一个常驻的技术项目经理，负责记基线、列 P0、复盘验收标准，我做审核和最终决策。
+- **不变的部分**：所有硬件接线、上电、示波器/逻辑分析仪实测、每一条“实机通过”结论，都是我自己在实物上完成和验证的。AI 不替你判断真实硬件行为——这也是这个仓库坚持把“AI 生成/建议”和“实机验证”分得很清楚的原因。
+
+## 面试怎么讲这个项目 / How to talk about this in interviews
+
+**30 秒版本**：一个 STM32F103 + FreeRTOS + ESP32 的智能家居终端，自己写了 Bootloader 和 OTA 协议，支持蓝牙和手机 Web 两种升级入口，做了多传感器采集和继电器/灯光联动，用逻辑分析仪定位过一个 WS2812B 时序 bug。开发过程中大量用 AI 做代码生成和调试辅助，但硬件接线、实机验证和最终工程判断都是自己做的。
+
+**大概率会被追问的问题（如实回答）：**
+
+| 追问 | 回答 |
+|------|------|
+| OTA 中途掉电会怎样？ | 会失效，需要重新 OTA 或用 ST-Link 重刷；原因是 64KB 单 Bank Flash 没有 A/B 分区预算，是资源约束下的真实取舍，生产方案会先写暂存区再原子切换。 |
+| UART 收发用了 DMA 吗？ | 目前是 RXNE 中断 + StreamBuffer，还没上 DMA + IDLE，这是当前实现，不是设计上限。 |
+| AI 帮你写了多少代码？ | 驱动骨架、协议解析、Web 前端等大量初稿由 AI 生成，但时序校准、引脚分配、实机排障和最终验证是自己做的（详见上面“AI 辅助开发”）。 |
+| 为什么用 GPIO bit-bang 而不是 SPI/DMA 产生 WS2812B 时序？ | SPI 编码在 `DOUT` 端验证不通过（见“项目最大的难点”），bit-bang 是实测有效的方案。 |
+| MQTT 真的能用吗？ | 代码编译通过、逻辑和 REST API 共用同一套 JSON 序列化，但还没接实机验证收发，如实说“待验证”，不说“已完成”。 |
+
+**准备好的调试故事**（对应 [docs/build-notes.md](docs/build-notes.md) 和 [CHANGELOG.md](CHANGELOG.md)）：
+
+1. WS2812B `DIN` 有波形但 `DOUT` 不转发——SPI 编码时序不匹配，换 GPIO bit-bang 解决。
+2. 协议 CRC-32 查表中 4 个错误常量——`123456789` 经典测试向量没触发，靠全字节 `0x00..0xFF` 向量补回归。
+3. 继电器/灯带供电链路问题——雾化驱动板未接负载直接上电烧毁，之后所有执行器接入前先确认负载再上电。
+4. Bootloader 与 HC-SR501 抢占 `PB0` 导致每次上电卡在维护模式——移除 Bootloader 对 `PB0` 的读取，PIR 专用该引脚，OTA 入口改用配置标志和 200ms UART 窗口。
+
+<details>
+<summary><strong>展开目录结构</strong></summary>
 
 ```
 stm32-smart-home-ota/
@@ -229,20 +334,25 @@ stm32-smart-home-ota/
 ├── bootloader/              # 8KB 自定义 Bootloader
 ├── application/             # STM32 FreeRTOS 应用
 ├── esp32-comm-bridge/       # ESP32 通信网关
-├── tools/                   # Python PC 工具
-└── docs/                    # 架构 + 接线 + API 文档
+├── tools/                   # Python PC 工具（含自动化 OTA 回归）
+└── docs/                    # 架构 + 接线 + API + 照片 + 抓包证据
 ```
 
 完整说明见 [docs/project-framework.md](docs/project-framework.md)
 
-## 本地验证记录（2026-08-07）
+</details>
+
+<details>
+<summary><strong>展开开发日志（按时间）</strong></summary>
+
+### 本地验证记录（2026-08-07）
 
 - Bootloader 已通过 PlatformIO + `ststm32` 平台编译验证：RAM 11.0% (2252B)，Flash 8.8% (5756B)，`firmware.bin` 约 6KB（满足 bootloader 8KB 硬约束）
 - 修复：`shared/protocol.h` 中 `BootConfig_t` 大小断言 56 → 48（实际 12×uint32=48B）；`FLASH_BASE`/`FLASH_PAGE_SIZE` 加 `#ifndef` 保护避免与 STM32 HAL 重定义
 - PC 端工具：`python tools/ota_sender.py COM3 fw.bin --version 2`（Windows 串口用 COM 格式）
 - 注意：ESP32 端编译需 PlatformIO 能访问官方包镜像（国内网络建议配置镜像源）
 
-## 本地验证记录（2026-08-08）
+### 本地验证记录（2026-08-08）
 
 **三端固件全部编译通过**（PlatformIO + ststm32 / espressif32）：
 
@@ -262,7 +372,7 @@ stm32-smart-home-ota/
 - **国内网络编译 ESP32 需代理**：`$env:HTTPS_PROXY='http://127.0.0.1:7897'; pio run -d esp32-comm-bridge`
 - Application 使用 8MHz HSE→PLL×8 的 64MHz 时钟；当时初次联调使用 9600 baud，当前 STM32↔ESP32 链路已统一为 115200 baud
 
-## 硬件 OTA 闭环验证（2026-08-09）
+### 硬件 OTA 闭环验证（2026-08-09）
 
 - ESP32（CH340，COM4）和 STM32（ST-Link SWD）均已完成烧录并通过写后校验。
 - 物理 UART：`ESP32 GPIO17 → PA10`、`ESP32 GPIO16 ← PA9`、两板 GND 直连；使用 USART1，9600 baud。
@@ -272,7 +382,7 @@ stm32-smart-home-ota/
 - 排查中发现两份 CRC 查表各有 4 个错误常量；`123456789` 经典向量恰好没有触发。现在额外用 `0x00..0xFF` 全字节向量（期望 `0x29058C73`）做回归，避免同类问题被单一测试向量漏掉。
 - iPhone 已连接 ESP32 SoftAP 并打开内置 Web OTA 页面；手机上传 15,956 字节 Application 镜像、目标版本设为 2，升级后通过 COM6 查询返回 `FW Version: 2`。该路径不需要 PC、ST-Link 或 ESP32 USB 参与固件发送。
 
-## 本地环境终端验证（2026-08-10）
+### 本地环境终端验证（2026-08-10）
 
 - I2C1 `PB6/PB7 @ 100kHz` 同时挂载 SSD1306、BH1750 和 AHT20+BMP280 组合板，四个地址均已在实机稳定工作。
 - OLED 菜单支持旋转选择、按键确认和返回；页面包括环境、光照、人体感应、系统状态与项目信息。
@@ -280,13 +390,21 @@ stm32-smart-home-ota/
 - HC-SR501 支持 30 秒预热状态和 HIGH/LOW 检测；BH1750 光照值可周期刷新。
 - Application 构建占用：RAM 17,676 B（86.3%），Flash 25,200 B（38.5%）；后续扩展需优先关注 RAM 余量。
 
-## 执行器与 WS2812B 联调验证（2026-08-11）
+### 执行器与 WS2812B 联调验证（2026-08-11）
 
 - 两路低电平触发继电器已改到 `PA2/PA3`，有源蜂鸣器接 `PB1`；供电、共地、手动命令和继电器触点动作均已实机确认。
 - WS2812B 使用 DP100 5V 经 1N4001 降到约 4.2V，数据线为 `PB5 → DIN`，灯带与 STM32 共地。入口串联 220~470Ω 数据电阻仍建议保留，但本次故障并不是缺少该电阻。
 - 原 SPI1 4MHz/5-bit 编码在 `DIN` 上测得的脉宽和数据都合理，但第一颗灯珠 `DOUT` 没有转发，灯带实际未接收。换回 64MHz 下经过实机验证的 GPIO bit-bang 后，第一颗 `DOUT` 捕获到后 14 颗共 336 bit、42 字节的有效帧，才算真正闭环。
 - 最终逻辑：BH1750 每 200ms 更新目标亮度，`≤5 lux → 160/255`、`≥1000 lux → 1/255`，中间反向线性映射；每次最多变化 16 级，2 级以内视为传感器抖动，且仅亮度确实变化时发送灯带帧。
 - 当前 Application 构建占用：RAM 17,900 B（87.4%），Flash 33,192 B（50.6%）。OLED 已改为常驻状态屏，TFT 使用无帧缓冲的局部刷新菜单。完整波形证据和排障结论见 [docs/build-notes.md](docs/build-notes.md)。
+
+### 自动化 OTA 回归与 PC13 心跳移除（2026-08-23 / 2026-08-24）
+
+- 新增 `tools/ota_regression.py`：自动完成固件基线记录、蓝牙/Web 两条 OTA 路径的发送与版本回读校验，结果写入 [docs/ota-regression-final.md](docs/ota-regression-final.md)。蓝牙路径 `VERSION=3` PASS，Web 路径 `VERSION=4` PASS。
+- 移除独立的状态灯心跳任务（`PC13`），FreeRTOS 从 5 任务简化为 4 任务，不再单独占用一个任务栈做心跳指示。
+- 新增 GitHub Actions `Firmware CI`：三端固件构建 + 共享协议烟测自动跑绿。
+
+</details>
 
 ## 关键约束
 
@@ -298,6 +416,20 @@ stm32-smart-home-ota/
 ### 已知限制：OTA 传输中途掉电无回退
 
 Bootloader 收到第一个 chunk 就会擦除 Application 区第 0 页（含中断向量表），所以 OTA 传输中途掉电会让旧固件立即失效：下次上电 `app_is_valid()` 判定应用无效，设备停在 Bootloader 的 maintenance 模式，需要重新完成一次 OTA 或用 ST-Link 重刷才能恢复。这是 64KB 单 Bank Flash、没有预留 A/B 分区空间的直接结果——生产级方案通常会先写暂存区、整体校验后再原子切换，但在 8KB Bootloader + 54KB Application 的预算下没有空间做这件事。建议 OTA 过程中保证电源稳定，避免中途拔线断电。
+
+## 文档索引
+
+| 文档 | 内容 |
+| --- | --- |
+| [CHANGELOG.md](CHANGELOG.md) | 双语开发变更记录，严格区分“已实机验证”与“规划中” |
+| [docs/resume-roadmap.md](docs/resume-roadmap.md) | 求职版本收口计划、简历表达草案与两项目组合定位 |
+| [docs/agent-handoff.md](docs/agent-handoff.md) | Agent 交接基线、P0 任务与实机验收红线 |
+| [docs/project-framework.md](docs/project-framework.md) | 完整引脚分配、面包板接线图与目录说明 |
+| [docs/build-notes.md](docs/build-notes.md) | 构建与硬件排障细节，含 WS2812B DIN/DOUT 排查全过程 |
+| [docs/web-realtime-dashboard.md](docs/web-realtime-dashboard.md) | Web 仪表盘与 `/api/sensors` 完整实现 |
+| [docs/ota-regression-final.md](docs/ota-regression-final.md) | 自动化 OTA 回归的固件基线与实机结果 |
+| [docs/photos/README.md](docs/photos/README.md) | 面包板实拍说明 |
+| [docs/captures/README.md](docs/captures/README.md) | 逻辑分析仪抓包证据（UART、WS2812B DIN/DOUT） |
 
 ## License
 
