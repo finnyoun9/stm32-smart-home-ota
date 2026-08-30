@@ -24,7 +24,7 @@
 
 ## Navigation
 
-[Why this project](#why-this-project) · [Status](#status) · [System architecture](#system-architecture) · [Tech stack](#tech-stack) · [Hardware photos](#hardware-photos) · [Getting started](#getting-started) · [Biggest technical challenge](#biggest-technical-challenge) · [AI-assisted development](#ai-assisted-development) · [Interview talking points](#how-to-talk-about-this-in-interviews) · [Documentation index](#documentation-index)
+[Why this project](#why-this-project) · [Status](#status) · [System architecture](#system-architecture) · [Tech stack](#tech-stack) · [Hardware photos](#hardware-photos) · [Getting started](#getting-started) · [Biggest technical challenge](#biggest-technical-challenge) · [AI-assisted development](#ai-assisted-development) · [Documentation index](#documentation-index)
 
 ## Why this project
 
@@ -301,27 +301,6 @@ This project was built end to end in collaboration with Claude Code / Codex, wit
 - **Debugging assistance**: I fed logic-analyzer waveform descriptions, serial logs, and failure symptoms to the AI and had it enumerate possible causes (for example, the several possible reasons the first WS2812B LED's `DOUT` produced nothing, or how to track down the 4 wrong constants in the CRC lookup table). I ruled hypotheses in or out on real hardware one at a time — the AI narrowed the search space; it didn't get to decide the conclusion.
 - **Engineering documentation and project management**: the "hardware-verified vs. planned" evidence-separation discipline running through [docs/agent-handoff.md](docs/agent-handoff.md), [docs/resume-roadmap.md](docs/resume-roadmap.md), and [CHANGELOG.md](CHANGELOG.md) was drafted and maintained primarily by the AI — effectively treating it as a standing technical project manager that tracks the baseline, lists P0 items, and reviews acceptance criteria, while I reviewed and made the final calls.
 - **What didn't change**: every bit of hardware wiring, powering-on, oscilloscope/logic-analyzer measurement, and every "hardware-verified" conclusion was done and confirmed by me on real hardware. AI doesn't get to judge real hardware behavior for you — that's also why this repository is strict about separating "AI-generated/suggested" from "hardware-verified."
-
-## How to talk about this in interviews
-
-**30-second pitch**: An STM32F103 + FreeRTOS + ESP32 smart-home terminal. I wrote the bootloader and OTA protocol myself, supporting both Bluetooth and phone-driven Web update paths, built multi-sensor sensing and relay/light linkage, and used a logic analyzer to track down a WS2812B timing bug. AI was used heavily for code generation and debugging assistance during development, but the hardware wiring, hardware verification, and final engineering judgment calls were all mine.
-
-**Likely follow-up questions (answered honestly):**
-
-| Follow-up | Answer |
-|------|------|
-| What happens if power is lost mid-OTA? | The old firmware is invalidated and needs a fresh OTA or a re-flash via ST-Link. The cause is the 64KB single-bank Flash having no budget for an A/B partition — a real trade-off; a production design would stage the write and switch atomically after full verification. |
-| Does the UART link use DMA? | Currently it's RXNE interrupt + StreamBuffer, not yet DMA + IDLE-line detection. That's the current implementation, not a design ceiling. |
-| How much of the code did AI write? | Large first drafts of the driver skeletons, protocol parsing, and Web frontend were AI-generated, but timing calibration, pin assignment, hardware debugging, and final verification were mine (see "AI-assisted development" above). |
-| Why GPIO bit-banging instead of SPI/DMA for WS2812B timing? | The SPI encoding failed verification at `DOUT` (see "Biggest technical challenge"); bit-banging is the approach that was actually proven on hardware. |
-| Does MQTT actually work? | It compiles and shares the same JSON serialization as the REST API, but hasn't been verified against real hardware yet — I say "not yet verified," not "done." |
-
-**Debugging stories kept ready** (see [docs/build-notes.md](docs/build-notes.md) and [CHANGELOG.md](CHANGELOG.md)):
-
-1. WS2812B: a valid `DIN` waveform but no `DOUT` forwarding — an SPI-timing mismatch, solved by switching to GPIO bit-banging.
-2. Protocol CRC-32: 4 wrong constants in the lookup table that the classic `123456789` test vector happened not to trigger — caught by adding a full-byte `0x00..0xFF` regression vector.
-3. Relay/light-strip power chain: the mist-maker driver board was damaged by powering it on with no load attached — every actuator now gets a load check before power-on.
-4. Bootloader vs. HC-SR501 contention over `PB0`, which stranded the device in maintenance mode on every power-up — resolved by removing the bootloader's read of `PB0`, dedicating that pin to the PIR sensor, and switching the OTA entry to a config flag plus a 200ms UART window.
 
 <details>
 <summary><strong>Expand directory structure</strong></summary>

@@ -26,7 +26,7 @@
 
 ## 导航
 
-[为什么做这个项目](#为什么做这个项目--why-this-project) · [当前进度](#当前进度--status) · [系统架构](#系统架构--system-architecture) · [技术栈](#技术栈) · [硬件实物](#硬件实物--hardware-photos) · [快速开始](#快速开始) · [最大的难点](#项目最大的难点--biggest-technical-challenge) · [AI 辅助开发](#ai-辅助开发--ai-assisted-development) · [面试怎么讲](#面试怎么讲这个项目--how-to-talk-about-this-in-interviews) · [文档索引](#文档索引)
+[为什么做这个项目](#为什么做这个项目--why-this-project) · [当前进度](#当前进度--status) · [系统架构](#系统架构--system-architecture) · [技术栈](#技术栈) · [硬件实物](#硬件实物--hardware-photos) · [快速开始](#快速开始) · [最大的难点](#项目最大的难点--biggest-technical-challenge) · [AI 辅助开发](#ai-辅助开发--ai-assisted-development) · [文档索引](#文档索引)
 
 ## 为什么做这个项目 / Why this project
 
@@ -303,27 +303,6 @@ OTA 页通过 `POST /api/upload?version=<N>` 上传固件，ESP32 检查 54KB �
 - **调试辅助**：把逻辑分析仪波形描述、串口日志、错误现象喂给 AI，让它列可能原因（比如 WS2812B 第一颗灯珠 `DOUT` 无输出的几种可能、CRC 查表里 4 个错误常量怎么定位），我按假设逐条上机排除——AI 帮助收窄范围，不负责下最终结论。
 - **工程文档与项目管理**：[docs/agent-handoff.md](docs/agent-handoff.md)、[docs/resume-roadmap.md](docs/resume-roadmap.md)、[CHANGELOG.md](CHANGELOG.md) 里“已验证/规划中”的证据分离规则，由 AI 主导编写和持续维护，相当于把 AI 当一个常驻的技术项目经理，负责记基线、列 P0、复盘验收标准，我做审核和最终决策。
 - **不变的部分**：所有硬件接线、上电、示波器/逻辑分析仪实测、每一条“实机通过”结论，都是我自己在实物上完成和验证的。AI 不替你判断真实硬件行为——这也是这个仓库坚持把“AI 生成/建议”和“实机验证”分得很清楚的原因。
-
-## 面试怎么讲这个项目 / How to talk about this in interviews
-
-**30 秒版本**：一个 STM32F103 + FreeRTOS + ESP32 的智能家居终端，自己写了 Bootloader 和 OTA 协议，支持蓝牙和手机 Web 两种升级入口，做了多传感器采集和继电器/灯光联动，用逻辑分析仪定位过一个 WS2812B 时序 bug。开发过程中大量用 AI 做代码生成和调试辅助，但硬件接线、实机验证和最终工程判断都是自己做的。
-
-**大概率会被追问的问题（如实回答）：**
-
-| 追问 | 回答 |
-|------|------|
-| OTA 中途掉电会怎样？ | 会失效，需要重新 OTA 或用 ST-Link 重刷；原因是 64KB 单 Bank Flash 没有 A/B 分区预算，是资源约束下的真实取舍，生产方案会先写暂存区再原子切换。 |
-| UART 收发用了 DMA 吗？ | 目前是 RXNE 中断 + StreamBuffer，还没上 DMA + IDLE，这是当前实现，不是设计上限。 |
-| AI 帮你写了多少代码？ | 驱动骨架、协议解析、Web 前端等大量初稿由 AI 生成，但时序校准、引脚分配、实机排障和最终验证是自己做的（详见上面“AI 辅助开发”）。 |
-| 为什么用 GPIO bit-bang 而不是 SPI/DMA 产生 WS2812B 时序？ | SPI 编码在 `DOUT` 端验证不通过（见“项目最大的难点”），bit-bang 是实测有效的方案。 |
-| MQTT 真的能用吗？ | 代码编译通过、逻辑和 REST API 共用同一套 JSON 序列化，但还没接实机验证收发，如实说“待验证”，不说“已完成”。 |
-
-**准备好的调试故事**（对应 [docs/build-notes.md](docs/build-notes.md) 和 [CHANGELOG.md](CHANGELOG.md)）：
-
-1. WS2812B `DIN` 有波形但 `DOUT` 不转发——SPI 编码时序不匹配，换 GPIO bit-bang 解决。
-2. 协议 CRC-32 查表中 4 个错误常量——`123456789` 经典测试向量没触发，靠全字节 `0x00..0xFF` 向量补回归。
-3. 继电器/灯带供电链路问题——雾化驱动板未接负载直接上电烧毁，之后所有执行器接入前先确认负载再上电。
-4. Bootloader 与 HC-SR501 抢占 `PB0` 导致每次上电卡在维护模式——移除 Bootloader 对 `PB0` 的读取，PIR 专用该引脚，OTA 入口改用配置标志和 200ms UART 窗口。
 
 <details>
 <summary><strong>展开目录结构</strong></summary>
