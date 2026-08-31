@@ -16,9 +16,9 @@
 ![ESP32](https://img.shields.io/badge/Gateway-ESP32-E7352C?logo=espressif)
 ![OTA](https://img.shields.io/badge/OTA-Bluetooth_%2F_Web-2563eb)
 
-<img src="docs/photos/breadboard-dev-progress-2.jpg" alt="面包板开发过程实拍" width="70%">
+<img src="docs/photos/stm32-smart-home-final-wiring.jpg" alt="STM32 智能家居最终接线实物图" width="70%">
 
-<sub>面包板开发阶段实拍 · 非最终装配状态 · 最终整机实物图待补</sub>
+<sub>最终接线实物图 · STM32F103 + ESP32 + 双屏 UI + 传感器与执行器</sub>
 
 </div>
 
@@ -184,6 +184,10 @@ PA5      (ADC) ───────────── MQ-2 烟雾 (经1k/2k分�
 
 ### 硬件实物 / Hardware photos
 
+<img src="docs/photos/stm32-smart-home-final-wiring.jpg" alt="STM32 智能家居最终接线实物图" width="70%">
+
+<sub>最终验收接线：STM32F103、ESP32、ST7789 TFT、SSD1306 OLED、传感器、EC11、继电器与灯带。</sub>
+
 <details>
 <summary><strong>展开面包板开发过程实拍</strong></summary>
 
@@ -195,7 +199,7 @@ PA5      (ADC) ───────────── MQ-2 烟雾 (经1k/2k分�
 | --- | --- |
 | ![面包板整体接线实拍](docs/photos/breadboard-overview-2026-08-17.jpg) | ![OLED UTF-8 修复前后对比](docs/photos/oled-utf8-fix-tft-vs-ssd1306-2026-08-17.jpg) |
 
-以上均为开发过程中的接线状态，**不是最终成品**；最终装配完成后的整机实物图会补充到这里。完整说明见 [docs/photos/README.md](docs/photos/README.md)。
+以上折叠图片均为开发过程中的接线状态；最终验收接线图已展示在本节顶部。完整说明见 [docs/photos/README.md](docs/photos/README.md)。
 
 </details>
 
