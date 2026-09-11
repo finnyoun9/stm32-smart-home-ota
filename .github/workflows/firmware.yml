@@ -20,6 +20,9 @@ jobs:
       - name: Build STM32 application
         run: pio run -e app
 
+      - name: Build STM32 low-power probe
+        run: pio run -e probe
+
       - name: Build ESP32 bridge
         run: pio run -d esp32-comm-bridge
 

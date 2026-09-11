@@ -14,6 +14,7 @@ if "upload" in COMMAND_LINE_TARGETS:
     FLASH_ADDRESS = {
         "bluepill": "0x08000000",
         "app": "0x08002000",
+        "probe": "0x08002000",
     }[env.subst("$PIOENV")]
 
     platform = env.PioPlatform()
