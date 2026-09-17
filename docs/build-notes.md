@@ -2,7 +2,53 @@
 
 > 三端固件均能通过 PlatformIO 构建；OTA、本地环境终端、继电器、蜂鸣器和 WS2812B 自动调光均已完成实机验证。
 
-## 三端编译结果
+## 2026-09-17 · UART 改为 DMA + IDLE 收包
+
+### 改动
+
+`application/Core/Src/uart_comm.c` 的 RX 路径由「每字节 RXNE 中断」改为「DMA1 Channel 5 循环接收 + USART IDLE 中断」：
+USART1_RX → DMA1_CH5（circular）→ `g_dma_rx_buf` → IDLE ISR 计算 DMA head 增量 → `xStreamBufferSendFromISR` → `vCommTask`。
+ISR 不再逐字节搬运，也不解析协议。
+
+同时回收了 Application 链接脚本里 1KB 的废弃 libc 堆：`libc.a` 已被 `/DISCARD/` 丢弃、应用从不调用 `malloc`，
+FreeRTOS `heap_4` 用自己的静态数组，所以 `._user_heap_stack` 里预留 1KB 是纯浪费。改为 128B 仅作链接守卫。
+
+### 中断次数下降（按协议与波特率**计算**，非示波器实测）
+
+| 项 | 旧方案（RXNE） | 新方案（DMA+IDLE） |
+| --- | --- | --- |
+| 单 chunk 事务字节数 | 1,048 B（1,032 帧 + 16 ACK 帧） | 同 |
+| 单 chunk 中断次数 | 1,048 | 2（一次接收 burst + 一次 ACK burst） |
+| 降幅 | — | **524×** |
+| 115200 下中断频率 | ~11,520 /s | 收到一帧才一次 |
+
+> 证据等级：**计算值**（依据：帧长 + 115200 8N1 10 bit/byte）。实机验证需在 IDLE ISR 里加计数器后回读，
+> 该计数已列入 `docs/observability.md` 的诊断快照计划。不要在任何对外材料里把它写成“实测”。
+
+### 构建结果
+
+| 固件 | RAM | Flash | 结论 |
+| --- | --- | --- | --- |
+| Bootloader (`-e bluepill`) | 11.0% (2,260B) | 10.7% (7,040B) | 未受影响 |
+| Application (`-e app`) | **97.3% (19,936B)** | **60.9% (39,888B)** | clean build，0 warning |
+| Probe (`-e probe`) | 0.6% (128B) | 6.9% (4,520B) | 未受影响 |
+| ESP32 Bridge (`-d esp32-comm-bridge`) | — | — | 构建通过 |
+
+其中 RAM 拆解：DMA 收包约 +1.9KB（`g_dma_rx_buf` 1,152B + StreamBuffer 1,152B），
+同时回收了链接脚本里 1KB 废弃 libc 堆；可观测性（`CMD_DIAG_SNAPSHOT`）增量 **+40B / +272B**。
+
+> Application RAM 剩余 **544 B**。这是当前最紧的资源约束，后续任何新增缓冲区都必须先核对这个数字。
+> DMA 收包本身不额外占用 RAM：DMA 直接写入 `g_dma_rx_buf`（1,152B），publish 到 StreamBuffer（1,152B），
+> 两者都必须 ≥ 单帧最大长度 1,032B，否则环形回绕会把帧截断。
+
+### 协议实现单一来源
+
+`esp32-comm-bridge/src/protocol.cpp` 不再手工维护：`tools/sync_protocol_mirror.py` 在每次 ESP32 构建时
+从 `shared/protocol.c` 重新生成它（PlatformIO `post:` hook）。副本仍然**入库**，因为 ESP-IDF 的
+`FILE(GLOB_RECURSE)` 在 `post:` 脚本之前执行，文件缺失会被静默漏编。CI 用
+`tools/check_protocol_mirror.py` 校验入库副本未漂移（忽略注释/空白/C++ 固有语法差异）。
+
+## 三端编译结果（2026-08-11 基线）
 
 | 固件 | 工具链 | RAM | Flash | 产物 |
 |------|--------|-----|-------|------|

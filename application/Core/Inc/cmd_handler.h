@@ -18,6 +18,7 @@
  *   - CMD_APP_MSG → forwards to application task
  *   - CMD_GET_STATUS → responds with current firmware version
  *   - CMD_GET_SENSOR_SNAPSHOT → returns the latest fixed-point app state
+ *   - CMD_DIAG_SNAPSHOT → returns the cached stack/heap runtime diagnostics
  *
  * @param f  Validated protocol frame.
  */

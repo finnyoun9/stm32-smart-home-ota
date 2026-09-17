@@ -11,6 +11,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 协议副本一致性：esp32-comm-bridge/src/protocol.cpp 由
+      # tools/sync_protocol_mirror.py 在构建时从 shared/protocol.c 生成，
+      # 但它必须入库（ESP-IDF 的 CMake FILE(GLOB) 在 PlatformIO 的 post: 脚本
+      # 之前执行，文件不存在会被静默漏编）。因此这里校验入库副本没有漂移。
+      # 该步骤只读两个文件、不需要 PlatformIO，放在最前面以便秒级早失败。
+      - name: Check shared protocol mirror
+        run: python3 tools/check_protocol_mirror.py
+
       - name: Set up PlatformIO
         run: python -m pip install --upgrade platformio
 
@@ -26,9 +34,48 @@ jobs:
       - name: Build ESP32 bridge
         run: pio run -d esp32-comm-bridge
 
+      # 构建体积报告：调用各目标的 PlatformIO size 目标，打印 RAM/Flash 占用，
+      # 便于 Review PR 时看到体积变化。实现要点：
+      #   1. 本步骤不带 if: always()，因此任一编译失败时会被跳过，不会执行，
+      #      也就不会掩盖或顶替原来的失败步骤；
+      #   2. 单个目标的 size 异常只产生 warning 注解，不改变本步骤退出码，
+      #      既不会让报告本身变成新的失败点，也不会吞掉其它目标的输出。
+      - name: Report firmware size
+        run: |
+          set -u
+          failed=0
+          report_size() {
+            name="$1"
+            shift
+            echo "::group::${name} RAM/Flash"
+            if ! "$@"; then
+              echo "::warning title=体积报告失败::${name} 未输出可读取的 size 结果（构建产物缺失或 size 目标异常）"
+              failed=$((failed + 1))
+            fi
+            echo "::endgroup::"
+          }
+          report_size "STM32 bootloader (bluepill)" pio run -e bluepill -t size
+          report_size "STM32 application (app)" pio run -e app -t size
+          report_size "STM32 low-power probe (probe)" pio run -e probe -t size
+          report_size "ESP32 bridge (esp32dev)" pio run -d esp32-comm-bridge -t size
+          if [ "${failed}" -ne 0 ]; then
+            echo "体积报告：${failed} 个目标未输出 size 结果，详见上方 warning 注解（不阻断 CI）。"
+          else
+            echo "体积报告：4 个目标均已输出 RAM/Flash 占用。"
+          fi
+
       - name: Run shared protocol smoke test
         run: |
           gcc -std=c11 -Wall -Wextra -Werror -Ishared \
             tools/protocol_smoke_test.c shared/protocol.c \
             -o protocol_smoke_test
           ./protocol_smoke_test
+
+      # 协议边界矩阵：粘包/拆包/前导垃圾/非法长度/位翻转/最大与零长度 payload。
+      # 纯 C11 + 零依赖，约 3 秒。
+      - name: Run protocol boundary test matrix
+        run: |
+          gcc -std=c11 -Wall -Wextra -Werror -Ishared \
+            tools/protocol_boundary_test.c shared/protocol.c \
+            -o protocol_boundary_test
+          ./protocol_boundary_test

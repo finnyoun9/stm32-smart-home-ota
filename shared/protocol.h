@@ -79,6 +79,7 @@ extern "C" {
 #define CMD_GET_STATUS          0x30U
 #define CMD_RESET               0x31U
 #define CMD_GET_SENSOR_SNAPSHOT 0x32U  /* request latest app sensor state */
+#define CMD_DIAG_SNAPSHOT       0x33U  /* request cached runtime diagnostics */
 
 /* Slave → Master (STM32 → ESP32) */
 #define CMD_OTA_BEGIN_ACK       0x81U
@@ -88,6 +89,14 @@ extern "C" {
 #define CMD_STATUS_RSP          0x85U
 #define CMD_OTA_READY           0x86U  /* app saved OTA request and will reboot */
 #define CMD_SENSOR_SNAPSHOT_RSP 0x87U
+#define CMD_DIAG_SNAPSHOT_RSP   0x88U
+
+/* DiagSnapshot_t.stack_high_water[] index order (fixed across all builds) */
+#define DIAG_TASK_COUNT         4U
+#define DIAG_TASK_IDX_COMM      0U
+#define DIAG_TASK_IDX_CONTROL   1U
+#define DIAG_TASK_IDX_APP       2U
+#define DIAG_TASK_IDX_MONITOR   3U
 
 /* SensorSnapshot_t.flags */
 #define SENSOR_FLAG_ENV_VALID     (1U << 0)
@@ -188,15 +197,38 @@ typedef struct {
     uint8_t  led_percent;       /* 0..100 relative to configured max */
 } SensorSnapshot_t;
 
+/**
+ * @brief Cached runtime observability state returned to the ESP32.
+ *
+ * Sampled by vMonitorTask (every DIAG_SNAPSHOT_UPDATE_MS) and copied out on
+ * CMD_DIAG_SNAPSHOT, so answering a request never walks the task lists.
+ * Stack figures are FreeRTOS "high water mark" values: the smallest number of
+ * *words* that ever remained free on that task's stack, so a smaller number
+ * means less headroom. 0xFFFF means "never sampled / task not created".
+ *
+ * Little-endian like SensorSnapshot_t; no floats.
+ */
+typedef struct {
+    uint32_t uptime_ms;                 /* since scheduler start */
+    uint32_t free_heap_bytes;           /* xPortGetFreeHeapSize() */
+    uint32_t min_ever_free_heap_bytes;  /* xPortGetMinimumEverFreeHeapSize() */
+    uint16_t stack_high_water[DIAG_TASK_COUNT]; /* words left, DIAG_TASK_IDX_* */
+    uint8_t  task_count;                /* entries valid in stack_high_water */
+    uint8_t  sample_seq;                /* +1 per sample; detects a stale cache */
+} DiagSnapshot_t;
+
 /* Statically verify sizes */
 #if defined(__cplusplus)
 static_assert(sizeof(BootConfig_t) == 48, "BootConfig_t size mismatch");
 static_assert(sizeof(SensorSnapshot_t) == 18,
               "SensorSnapshot_t size mismatch");
+static_assert(sizeof(DiagSnapshot_t) == 22, "DiagSnapshot_t size mismatch");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(BootConfig_t) == 48, "BootConfig_t size mismatch");
 _Static_assert(sizeof(SensorSnapshot_t) == 18,
                "SensorSnapshot_t size mismatch");
+_Static_assert(sizeof(DiagSnapshot_t) == 22,
+               "DiagSnapshot_t size mismatch");
 #endif
 
 #pragma pack(pop)

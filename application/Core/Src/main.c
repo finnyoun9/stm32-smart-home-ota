@@ -67,6 +67,11 @@ static uint8_t              g_light_manual_percent = 50U;
 static uint8_t              g_light_brightness;
 static bool                 g_ui_chinese = true;
 
+/* 运行时诊断缓存：vMonitorTask 周期采样，CMD_DIAG_SNAPSHOT 直接读取，
+ * 避免在命令处理路径里遍历任务列表。句柄顺序与 DIAG_TASK_IDX_* 一致。 */
+static TaskHandle_t         g_diag_task_handles[DIAG_TASK_COUNT];
+static DiagSnapshot_t       g_diag_snapshot;
+
 /* The CMSIS startup file copies .data only. ota_config.c places the short
  * Flash erase/program wrappers in .ramfunc, so initialize that section before
  * the control task can write the OTA configuration page. */
@@ -89,6 +94,7 @@ extern uint8_t _eramfunc;
 #define WS2812_BRIGHTNESS_DEADBAND   2U
 #define WS2812_REFRESH_MS             1000U
 #define SENSOR_SNAPSHOT_UPDATE_MS    200U
+#define DIAG_SNAPSHOT_UPDATE_MS      5000U
 
 /*---------------------------------------------------------------------------
  * System init
@@ -194,8 +200,12 @@ static void vCommTask(void *pvParameters) {
     uint8_t rx_byte;
     size_t rx_count;
 
+    /* The DMA may have filled part of its buffer before this task first ran,
+     * and the IDLE interrupt only fires on a new burst edge. Drain once so
+     * nothing that arrived during startup is stranded. */
+    uart_comm_drain_rx();
+
     for (;;) {
-        /* Block waiting for UART bytes from the stream buffer */
         rx_count = xStreamBufferReceive(g_rx_stream, &rx_byte, 1,
                                         pdMS_TO_TICKS(100));
 
@@ -756,19 +766,43 @@ static void ui_status_build(UiStatus_t *status,
 
 static void vMonitorTask(void *pvParameters) {
     (void)pvParameters;
+    TickType_t last_diag_snapshot = 0U;
+    bool diag_sampled = false;
+    uint8_t sample_seq = 0U;
 
     for (;;) {
-        /* Monitor stack high-water marks (debug builds only) */
-        #if (configUSE_TRACE_FACILITY == 1)
-        {
-            /* Log or check task stack usage */
-            /* UBaseType_t stack_free = uxTaskGetStackHighWaterMark(NULL); */
-        }
-        #endif
+        const TickType_t now = xTaskGetTickCount();
 
-        /* Monitor heap */
-        size_t free_heap = xPortGetFreeHeapSize();
-        (void)free_heap; /* Can be logged via debug UART */
+        /* 每 5s 采样一次运行时余量，写进 static 缓存供 CMD_DIAG_SNAPSHOT 读取。
+         * 全程无动态分配，采样本身也不阻塞（句柄在创建任务时已保存）。 */
+        if (!diag_sampled ||
+            (now - last_diag_snapshot) >=
+                pdMS_TO_TICKS(DIAG_SNAPSHOT_UPDATE_MS)) {
+            diag_sampled = true;
+            last_diag_snapshot = now;
+
+            DiagSnapshot_t sample;
+            sample.uptime_ms = (uint32_t)(now * portTICK_PERIOD_MS);
+            sample.free_heap_bytes = (uint32_t)xPortGetFreeHeapSize();
+            sample.min_ever_free_heap_bytes =
+                (uint32_t)xPortGetMinimumEverFreeHeapSize();
+
+            /* 高水位 = 历史最小剩余栈，单位 word；句柄为空说明任务未创建 */
+            for (uint8_t i = 0U; i < DIAG_TASK_COUNT; i++) {
+                sample.stack_high_water[i] =
+                    (g_diag_task_handles[i] != NULL)
+                        ? (uint16_t)uxTaskGetStackHighWaterMark(
+                              g_diag_task_handles[i])
+                        : 0xFFFFU;
+            }
+
+            sample.task_count = (uint8_t)DIAG_TASK_COUNT;
+            sample.sample_seq = ++sample_seq;
+
+            taskENTER_CRITICAL();
+            g_diag_snapshot = sample;
+            taskEXIT_CRITICAL();
+        }
 
         iwdg_refresh();
 
@@ -792,23 +826,25 @@ void app_tasks_init(void) {
     configASSERT(g_event_group != NULL);
     configASSERT(g_rx_stream != NULL);
 
-    /* Create tasks */
+    /* Create tasks — 句柄同时交给 vMonitorTask 做栈水位采集 */
     BaseType_t ret;
 
     ret = xTaskCreate(vCommTask, "Comm", STACK_COMM_TASK, NULL,
-                      PRIO_COMM_TASK, NULL);
+                      PRIO_COMM_TASK, &g_diag_task_handles[DIAG_TASK_IDX_COMM]);
     configASSERT(ret == pdPASS);
 
     ret = xTaskCreate(vControlTask, "Control", STACK_CONTROL_TASK, NULL,
-                      PRIO_CONTROL_TASK, NULL);
+                      PRIO_CONTROL_TASK,
+                      &g_diag_task_handles[DIAG_TASK_IDX_CONTROL]);
     configASSERT(ret == pdPASS);
 
     ret = xTaskCreate(vAppTask, "App", STACK_APP_TASK, NULL,
-                      PRIO_APP_TASK, NULL);
+                      PRIO_APP_TASK, &g_diag_task_handles[DIAG_TASK_IDX_APP]);
     configASSERT(ret == pdPASS);
 
     ret = xTaskCreate(vMonitorTask, "Monitor", STACK_MONITOR_TASK, NULL,
-                      PRIO_MONITOR_TASK, NULL);
+                      PRIO_MONITOR_TASK,
+                      &g_diag_task_handles[DIAG_TASK_IDX_MONITOR]);
     configASSERT(ret == pdPASS);
 }
 
@@ -857,6 +893,19 @@ void cmd_handler_dispatch(const ProtoFrame_t *f) {
             cmd_handler_send_frame(CMD_SENSOR_SNAPSHOT_RSP,
                                    (const uint8_t *)&snapshot,
                                    sizeof(snapshot));
+        }
+        break;
+
+    case CMD_DIAG_SNAPSHOT:
+        {
+            /* 请求 payload 为空；直接返回 vMonitorTask 缓存的上一次采样 */
+            DiagSnapshot_t diag;
+            taskENTER_CRITICAL();
+            diag = g_diag_snapshot;
+            taskEXIT_CRITICAL();
+            cmd_handler_send_frame(CMD_DIAG_SNAPSHOT_RSP,
+                                   (const uint8_t *)&diag,
+                                   sizeof(diag));
         }
         break;
 

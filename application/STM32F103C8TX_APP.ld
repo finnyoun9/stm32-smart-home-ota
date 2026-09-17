@@ -135,8 +135,12 @@ SECTIONS
         . = ALIGN(8);
         PROVIDE(end = .);
         PROVIDE(_end = .);
-        . = . + 1K;   /* heap_4 owns the FreeRTOS heap (static array);
-                       * this region only serves libc _end/_sbrk */
+        /* libc is /DISCARD/ed below and the application never calls malloc:
+         * FreeRTOS heap_4 owns its own static array (configTOTAL_HEAP_SIZE).
+         * So `end`/`__heap_limit` only need to exist as symbols, and the RAM
+         * previously reserved here is pure waste on a 20KB part.
+         * 128 B is kept purely as a link-time sanity guard. */
+        . = . + 128;
         . = ALIGN(8);
         __heap_limit = .;
     } > RAM

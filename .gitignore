@@ -45,3 +45,7 @@ Thumbs.db
 __pycache__/
 *.pyc
 .venv/
+
+
+# Local agent memory (MemSearch session store)
+.memsearch/
