@@ -48,7 +48,20 @@
  * Communication handles
  *---------------------------------------------------------------------------*/
 
-static QueueHandle_t        g_cmd_queue;       /* ProtoFrame_t*: comm → control */
+/**
+ * @brief An OTA offer received from the ESP32 (CMD_OTA_AVAILABLE).
+ *
+ * Carries the image size as well as the version so the application can record
+ * the expected size in the config *before* the transfer starts. Without it the
+ * bootloader would have no size to check the image CRC against, and a transfer
+ * interrupted by a power loss would be jumped into as if it were complete.
+ */
+typedef struct {
+    uint32_t version;
+    uint32_t size;
+} OtaRequest_t;
+
+static QueueHandle_t        g_cmd_queue;       /* OtaRequest_t: comm → control */
 static QueueHandle_t        g_data_queue;      /* Raw bytes: comm → app */
 static EventGroupHandle_t   g_event_group;
 static StreamBufferHandle_t g_rx_stream;
@@ -83,6 +96,12 @@ extern uint8_t _eramfunc;
 #define EVENT_OTA_AVAILABLE  (1 << 0)
 #define EVENT_CONNECTED      (1 << 1)
 #define EVENT_ERROR          (1 << 2)
+
+/* How long the application must run before it considers itself healthy and
+ * confirms the boot. Until it does, the bootloader treats the image as
+ * unverified: a firmware that crashes on startup never gets here, so its boot
+ * attempt count keeps climbing across resets and recovery is triggered. */
+#define BOOT_CONFIRM_DELAY_MS  3000U
 
 #define WS2812_UPDATE_MS             200U
 #define WS2812_DARK_LUX              5U
@@ -233,6 +252,19 @@ static void vControlTask(void *pvParameters) {
         cmd_handler_send_frame(CMD_STATUS_RSP, (uint8_t *)&version, 4);
     }
 
+    /* Boot confirmation.
+     *
+     * The bootloader has already counted this boot. Waiting a few seconds
+     * before confirming means a firmware that dies during startup — sensor
+     * init, UI init, a bad driver — never reaches this point, so its attempt
+     * count keeps rising across the resets the watchdog causes, and the
+     * bootloader eventually stops trusting the image and asks the host to
+     * re-send firmware. A healthy boot costs exactly one config write. */
+    vTaskDelay(pdMS_TO_TICKS(BOOT_CONFIRM_DELAY_MS));
+    if (!ota_config_confirm_boot()) {
+        cmd_handler_send_frame(CMD_NAK, NULL, 0);
+    }
+
     for (;;) {
         EventBits_t bits = xEventGroupWaitBits(
             g_event_group,
@@ -243,16 +275,20 @@ static void vControlTask(void *pvParameters) {
         );
 
         if (bits & EVENT_OTA_AVAILABLE) {
-            /* A new firmware version is available on the ESP32.
-             * Read the version from the event group (passed via queue). */
-            uint32_t pending_version;
-            if (xQueueReceive(g_cmd_queue, &pending_version, 0) == pdPASS) {
-                /* Write OTA request to config then reboot into bootloader */
-                if (ota_config_request_update(pending_version, 0)) {
+            /* A new firmware version is available on the ESP32. */
+            OtaRequest_t request;
+            if (xQueueReceive(g_cmd_queue, &request, 0) == pdPASS) {
+                /* Write OTA request to config then reboot into bootloader.
+                 *
+                 * The expected image size is recorded here, before the transfer
+                 * starts. That is what lets the bootloader recompute the image
+                 * CRC after an interrupted transfer and refuse to boot a body
+                 * that is half old and half new. */
+                if (ota_config_request_update(request.version, request.size)) {
                     /* Confirm only after the config page is valid. The ESP32
                      * waits for this before it begins the bootloader transfer. */
                     cmd_handler_send_frame(CMD_OTA_READY,
-                                           (const uint8_t *)&pending_version, 4);
+                                           (const uint8_t *)&request.version, 4);
                     /* Small delay so the confirmation fully leaves USART1. */
                     vTaskDelay(pdMS_TO_TICKS(50));
                     NVIC_SystemReset();
@@ -816,7 +852,7 @@ static void vMonitorTask(void *pvParameters) {
 
 void app_tasks_init(void) {
     /* Create communication primitives */
-    g_cmd_queue   = xQueueCreate(QUEUE_CMD_LENGTH, sizeof(uint32_t));
+    g_cmd_queue   = xQueueCreate(QUEUE_CMD_LENGTH, sizeof(OtaRequest_t));
     g_data_queue  = xQueueCreate(QUEUE_DATA_LENGTH, 64);
     g_event_group = xEventGroupCreate();
     g_rx_stream   = uart_comm_get_rx_stream();
@@ -856,9 +892,12 @@ void cmd_handler_dispatch(const ProtoFrame_t *f) {
     switch (f->cmd) {
     case CMD_OTA_AVAILABLE:
         if (f->len >= 4) {
-            uint32_t version;
-            memcpy(&version, f->payload, 4);
-            xQueueSend(g_cmd_queue, &version, 0);
+            OtaRequest_t request = {0};
+            memcpy(&request.version, f->payload, 4);
+            if (f->len >= 8) {
+                memcpy(&request.size, f->payload + 4, 4);
+            }
+            xQueueSend(g_cmd_queue, &request, 0);
             xEventGroupSetBits(g_event_group, EVENT_OTA_AVAILABLE);
         }
         break;

@@ -41,12 +41,28 @@ FreeRTOS `heap_4` 用自己的静态数组，所以 `._user_heap_stack` 里预�
 > DMA 收包本身不额外占用 RAM：DMA 直接写入 `g_dma_rx_buf`（1,152B），publish 到 StreamBuffer（1,152B），
 > 两者都必须 ≥ 单帧最大长度 1,032B，否则环形回绕会把帧截断。
 
-### 协议实现单一来源
+### 协议实现单一来源（镜像副本已彻底消除）
 
-`esp32-comm-bridge/src/protocol.cpp` 不再手工维护：`tools/sync_protocol_mirror.py` 在每次 ESP32 构建时
-从 `shared/protocol.c` 重新生成它（PlatformIO `post:` hook）。副本仍然**入库**，因为 ESP-IDF 的
-`FILE(GLOB_RECURSE)` 在 `post:` 脚本之前执行，文件缺失会被静默漏编。CI 用
-`tools/check_protocol_mirror.py` 校验入库副本未漂移（忽略注释/空白/C++ 固有语法差异）。
+协议实现现在**全仓库只有一份**：`shared/protocol.c`。ESP32 侧不再有 `protocol.cpp` 副本，而是由
+`esp32-comm-bridge/components/shared_protocol/` 这个独立 ESP-IDF 组件声明：
+
+```cmake
+idf_component_register(
+    SRCS "../../../shared/protocol.c"
+    INCLUDE_DIRS "../../../shared"
+)
+```
+
+独立组件是关键：ESP-IDF 会把 `src/` 里 `main.cpp` 旁边的文件按 C++ 编译，而 `protocol.c` 是 C。
+放进自己的组件后由 CMake 交给 C 编译器，语言冲突自然消失，副本也就没有存在理由。
+
+CI 里加了「断言副本不存在」的步骤，防止有人无意中重建它而重新引入漂移风险。
+
+> 走过的弯路（值得记住）：曾用 PlatformIO `extra_scripts` 在构建时生成 `protocol.cpp`。
+> 无论 `pre:` 还是 `post:`，`extra_scripts` 都在 SCons 里执行，**会静默吞掉实际编译**——
+> `pio run` 打印 `[SUCCESS]` 但零产物、连 `firmware.elf` 都不生成。`pre:` 还会破坏
+> ESP-IDF 的 toolchain 文件生成，直接报 `CMAKE_C_COMPILER not set`。结论：不要用
+> `extra_scripts` 去做源文件生成，改用 CMake 组件。
 
 ## 三端编译结果（2026-08-11 基线）
 

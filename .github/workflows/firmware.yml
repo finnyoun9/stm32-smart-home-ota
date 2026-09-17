@@ -11,13 +11,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 协议副本一致性：esp32-comm-bridge/src/protocol.cpp 由
-      # tools/sync_protocol_mirror.py 在构建时从 shared/protocol.c 生成，
-      # 但它必须入库（ESP-IDF 的 CMake FILE(GLOB) 在 PlatformIO 的 post: 脚本
-      # 之前执行，文件不存在会被静默漏编）。因此这里校验入库副本没有漂移。
-      # 该步骤只读两个文件、不需要 PlatformIO，放在最前面以便秒级早失败。
-      - name: Check shared protocol mirror
-        run: python3 tools/check_protocol_mirror.py
+      # 协议实现只有一份：shared/protocol.c。ESP32 侧不再有 C++ 副本，
+      # 而是由 esp32-comm-bridge/components/shared_protocol/ 这个独立 IDF 组件
+      # 用 C 编译器直接编译该文件。这里断言副本确实不存在了——它的回归会立刻
+      # 重新引入「同一职责两个 owner」的漂移风险。
+      - name: Assert protocol has a single source of truth
+        run: |
+          if [ -e esp32-comm-bridge/src/protocol.cpp ]; then
+            echo "::error::esp32-comm-bridge/src/protocol.cpp 又出现了。" \
+                 "shared/protocol.c 是协议的唯一来源，请改用 shared_protocol 组件，不要重建副本。"
+            exit 1
+          fi
+          echo "OK: shared/protocol.c 是唯一来源，ESP32 通过 shared_protocol 组件编译它。"
 
       - name: Set up PlatformIO
         run: python -m pip install --upgrade platformio
@@ -79,3 +84,12 @@ jobs:
             tools/protocol_boundary_test.c shared/protocol.c \
             -o protocol_boundary_test
           ./protocol_boundary_test
+
+      # 配置区双副本（ping-pong）的选择逻辑：模拟「写入中断后旧副本必须胜出」。
+      # ota_config.c 依赖 STM32 HAL 无法在主机链接，故测试的是同规则的模型。
+      - name: Run OTA config ping-pong logic test
+        run: |
+          gcc -std=c11 -Wall -Wextra -Werror -Ishared \
+            tools/ota_config_logic_test.c shared/protocol.c \
+            -o ota_config_logic_test
+          ./ota_config_logic_test

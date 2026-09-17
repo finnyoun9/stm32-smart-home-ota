@@ -1689,12 +1689,24 @@ static bool transfer_to_stm32_impl(void) {
 
     /* Step 1: ask the running application to persist its OTA request and
      * reboot. CMD_OTA_READY makes the timing deterministic instead of relying
-     * on a guessed reset delay. */
+     * on a guessed reset delay.
+     *
+     * The payload carries version + image size. The size is what lets the
+     * bootloader recompute the application region's CRC on the next boot and
+     * refuse to jump into the half-written body a power loss would leave
+     * behind. A 4-byte payload is still accepted by the application (size
+     * treated as unknown) so an older bridge keeps working — but that mode
+     * cannot detect a torn image. */
     uart_flush_input(UART_STM32_NUM);
-    if (!stm32_send_frame(CMD_OTA_AVAILABLE,
-                          (const uint8_t *)&g_fw_version, 4)) {
-        fclose(f);
-        return false;
+    {
+        uint8_t availability[8];
+        memcpy(availability, &g_fw_version, 4);
+        memcpy(availability + 4, &g_fw_size, 4);
+        if (!stm32_send_frame(CMD_OTA_AVAILABLE, availability,
+                              sizeof(availability))) {
+            fclose(f);
+            return false;
+        }
     }
 
     ProtoFrame_t resp;

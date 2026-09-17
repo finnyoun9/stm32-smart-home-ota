@@ -38,6 +38,11 @@ static OtaContext_t           g_ota;
 static uint8_t               g_frame_buf[PROTO_MAX_FRAME];
 static uint32_t              g_ticks_at_boot;  /* HAL tick at reset */
 
+/* Why this boot is opening an OTA window — reported to the host in
+ * CMD_STATUS_RSP so it can tell "all good" from "send me firmware". */
+static uint32_t              g_recovery_status = RECOVERY_STATUS_NORMAL;
+static uint32_t              g_boot_attempts;
+
 /* The vendor startup file initializes .data/.bss only. The linker places
  * flash-writing routines in .ramfunc, so copy that image explicitly before
  * any OTA flash operation can run. */
@@ -342,6 +347,44 @@ static uint32_t compute_image_crc(void) {
     return crc;
 }
 
+/**
+ * @brief Recompute the CRC-32 of everything already sitting in the app region.
+ *
+ * Used at boot to tell a complete image apart from a half-transferred one. A
+ * power loss in the middle of an OTA leaves the region part old, part new: the
+ * vector table may still look valid, so `app_is_valid()` alone would happily
+ * jump into a firmware that cannot run. Comparing against the CRC recorded when
+ * the image was committed catches exactly that case.
+ *
+ * @param expected_size  Image size recorded in the config.
+ * @param expected_crc   CRC-32 recorded in the config.
+ */
+static bool app_image_crc_ok(uint32_t expected_size, uint32_t expected_crc) {
+    if (expected_size == 0U || expected_size > APP_SIZE) {
+        /* No recorded size (pre-upgrade firmware) — nothing to verify against.
+         * Treat as acceptable rather than refusing to boot a working device. */
+        return true;
+    }
+
+    uint32_t crc = 0U;
+    const uint8_t *addr = (const uint8_t *)APP_BASE;
+    uint32_t remaining = expected_size;
+
+    while (remaining >= 4U) {
+        uint32_t word = *(const volatile uint32_t *)addr;
+        crc = proto_crc32((const uint8_t *)&word, 4U, crc);
+        addr += 4;
+        remaining -= 4U;
+    }
+    while (remaining > 0U) {
+        crc = proto_crc32(addr, 1U, crc);
+        addr++;
+        remaining--;
+    }
+
+    return crc == expected_crc;
+}
+
 /*---------------------------------------------------------------------------
  * OTA command handlers
  *---------------------------------------------------------------------------*/
@@ -544,59 +587,105 @@ void bootloader_run(void) {
     proto_parser_init(&g_parser);
     memset(&g_ota, 0, sizeof(g_ota));
 
-    /* --- Boot decision --- */
+    /* --- Boot decision ---
+     *
+     * The bootloader decides in this order:
+     *   1. count this boot (backup register; survives watchdog/HardFault reset)
+     *   2. an explicit OTA request wins
+     *   3. otherwise the app must be structurally valid AND match the CRC that
+     *      was recorded when it was committed, AND have confirmed a previous
+     *      boot. Anything less means a transfer was interrupted or the image
+     *      crash-loops, either of which needs the host to re-send firmware.
+     */
 
-    /* 1. Check config for pending OTA request */
     BootConfig_t cfg;
     bool cfg_valid = ota_config_read(&cfg);
 
-    if (cfg_valid && cfg.boot_mode == BOOT_MODE_OTA) {
-        /* Application requested OTA — enter OTA mode with a longer window */
-        g_state = ST_WAIT_HANDSHAKE;
-        led_on(); /* Solid LED = OTA mode */
+    (void)ota_config_record_boot_attempt(&g_boot_attempts);
+
+    if (!app_is_valid()) {
+        g_recovery_status = RECOVERY_STATUS_NO_APP;
+    } else if (cfg_valid && cfg.boot_mode == BOOT_MODE_OTA) {
+        /* The application itself asked for this update. */
+        g_recovery_status = RECOVERY_STATUS_OTA_PENDING;
+    } else if (!cfg_valid) {
+        /* Structurally valid app but no readable config: there is no recorded
+         * CRC to check and no boot history, so boot it and let the app rebuild
+         * the config. This also covers a config page that failed to program. */
+        g_recovery_status = RECOVERY_STATUS_NORMAL;
+    } else if (!app_image_crc_ok(cfg.image_size, cfg.image_crc32)) {
+        g_recovery_status = RECOVERY_STATUS_IMAGE_INVALID;
+    } else if (cfg.boot_confirmed == 0U &&
+               g_boot_attempts > BOOT_ATTEMPT_LIMIT) {
+        /* The image is byte-correct but has never managed to confirm a boot,
+         * BOOT_ATTEMPT_LIMIT times in a row: it runs and dies. */
+        g_recovery_status = RECOVERY_STATUS_BOOT_UNCONFIRMED;
     } else {
-        /* Normal boot: give ESP32 a short window to initiate OTA */
-        g_state = ST_WAIT_HANDSHAKE;
+        g_recovery_status = RECOVERY_STATUS_NORMAL;
+    }
+
+    g_state = ST_WAIT_HANDSHAKE;
+
+    if (g_recovery_status == RECOVERY_STATUS_OTA_PENDING) {
+        led_on(); /* Solid LED = OTA mode */
+    } else if (g_recovery_status != RECOVERY_STATUS_NORMAL) {
+        led_on(); /* Solid LED = needs firmware */
     }
 
     /* --- OTA handshake window --- */
 
     if (g_state == ST_WAIT_HANDSHAKE) {
-        uint32_t window = cfg_valid && cfg.boot_mode == BOOT_MODE_OTA
-                          ? 2000U    /* 2s when OTA was explicitly requested */
-                          : OTA_WINDOW_MS;  /* 200ms passive window */
+        uint32_t window;
+
+        if (g_recovery_status == RECOVERY_STATUS_OTA_PENDING) {
+            window = 2000U;               /* 2s: the host already knows */
+        } else if (g_recovery_status != RECOVERY_STATUS_NORMAL) {
+            /* Long window so the host can notice and re-send firmware without
+             * anyone touching the board. The device stays reachable here. */
+            window = OTA_RECOVERY_WINDOW_MS;
+        } else {
+            window = OTA_WINDOW_MS;       /* 200ms passive window */
+        }
 
         const ProtoFrame_t *f = wait_for_frame(window);
 
         if (f != NULL && f->cmd == CMD_OTA_BEGIN) {
             process_ota_begin(f);
         } else if (f != NULL && f->cmd == CMD_GET_STATUS) {
-            /* ESP32 is polling — stay in bootloader */
-            uint32_t status = (cfg_valid && cfg.boot_mode == BOOT_MODE_OTA)
-                              ? BOOT_MODE_OTA : BOOT_MODE_APP;
-            uart_send_frame(CMD_STATUS_RSP, (const uint8_t *)&status, 4);
-            /* Stay and wait again */
-            f = wait_for_frame(5000U);
+            /* Host is polling — report why we are still here, then keep
+             * waiting. A host that sees a non-NORMAL status should re-send the
+             * last known good image. */
+            uart_send_frame(CMD_STATUS_RSP,
+                            (const uint8_t *)&g_recovery_status, 4);
+            if (g_recovery_status != RECOVERY_STATUS_NORMAL) {
+                /* Already in recovery: keep the long window open. */
+                f = wait_for_frame(OTA_RECOVERY_WINDOW_MS);
+            } else {
+                f = wait_for_frame(5000U);
+            }
             if (f != NULL && f->cmd == CMD_OTA_BEGIN) {
                 process_ota_begin(f);
             }
         } else if (g_state == ST_WAIT_HANDSHAKE) {
             /* Timeout — jump to app if valid, otherwise stay */
-            if (!cfg_valid || cfg.boot_mode == BOOT_MODE_OTA) {
-                /* OTA was requested but ESP32 never responded.
-                 * In a production system, retry or fall back.
-                 * For prototype: jump to existing app if valid. */
-                if (app_is_valid()) {
-                    bootloader_jump_to_app();
-                }
-                /* No valid app, stay in bootloader */
-                g_state = ST_MAINTENANCE;
-            } else {
-                if (app_is_valid()) {
-                    bootloader_jump_to_app();
-                }
-                g_state = ST_MAINTENANCE;
+            /* Jump unless we know booting would fail. `OTA_PENDING` means the
+             * host simply did not answer in time — the existing application is
+             * still the best thing on this device, and it is what retries the
+             * update, so hand over. Only a torn image, an image that never
+             * confirms a boot, or no image at all justifies staying here. */
+            if (app_is_valid()
+                && g_recovery_status != RECOVERY_STATUS_IMAGE_INVALID
+                && g_recovery_status != RECOVERY_STATUS_BOOT_UNCONFIRMED
+                && g_recovery_status != RECOVERY_STATUS_NO_APP) {
+                bootloader_jump_to_app();
             }
+
+            /* Nothing bootable, or the host was told this device needs
+             * firmware and did not deliver it. Stay reachable in maintenance
+             * mode rather than jumping into an image known to be bad — that is
+             * the difference between "needs a re-flash" and "crash-loops
+             * forever". */
+            g_state = ST_MAINTENANCE;
         }
     }
 
@@ -657,8 +746,12 @@ void bootloader_run(void) {
                     break;
                 case CMD_GET_STATUS:
                     {
-                        uint32_t status = 0;
-                        uart_send_frame(CMD_STATUS_RSP, (const uint8_t *)&status, 4);
+                        /* Report the real recovery reason, not a constant. This
+                         * is the field the host polls to decide whether to
+                         * re-send firmware; answering 0 here would make a device
+                         * stuck in recovery look healthy forever. */
+                        uart_send_frame(CMD_STATUS_RSP,
+                                        (const uint8_t *)&g_recovery_status, 4);
                     }
                     break;
                 case CMD_RESET:

@@ -55,8 +55,26 @@ extern "C" {
 #define CONFIG_SIZE             0x00000800U   /* 2KB, pages 62-63 */
 #define CONFIG_PAGE             62U
 
+/* The config region holds two identical copies, one per page, written
+ * alternately (ping-pong). This is what makes a config update atomic: a single
+ * flash page can only be erased as a whole, so two copies inside one page would
+ * both vanish during the erase. With one copy per page, the page that is not
+ * being written always still holds the previous valid config, and
+ * BootConfig_t.config_seq decides which copy is newer. */
+#define CONFIG_PAGE_A           62U
+#define CONFIG_PAGE_B           63U
+#define CONFIG_RECORD_SIZE      64U           /* padded record per page */
+
 /* OTA window: bootloader waits this long (ms) for OTA_BEGIN after reset */
 #define OTA_WINDOW_MS           200U
+
+/* Window used when the bootloader has decided the host must re-send firmware
+ * (partial/invalid image, or an application that never confirmed its boot). */
+#define OTA_RECOVERY_WINDOW_MS  10000U
+
+/* Consecutive unconfirmed boots before the bootloader declares the image bad
+ * and opens the long recovery window. */
+#define BOOT_ATTEMPT_LIMIT      3U
 
 /* Per-chunk ACK timeout (ms) — ESP32 side.
  * Sized for the original 9600-baud bring-up link (~1.1s per 1 KiB chunk);
@@ -150,6 +168,19 @@ extern "C" {
 #define UPDATE_STATUS_IN_PROGRESS 0x00000003U
 
 /*---------------------------------------------------------------------------
+ * Recovery status — the bootloader's own reason for opening the OTA window.
+ *
+ * Reported in CMD_STATUS_RSP so the host can tell "all good, this was just the
+ * passive boot window" apart from "this device needs firmware re-sent".
+ * ---------------------------------------------------------------------------*/
+
+#define RECOVERY_STATUS_NORMAL           0x00000000U /* app valid + boot confirmed */
+#define RECOVERY_STATUS_OTA_PENDING      0x00000001U /* app asked for an update */
+#define RECOVERY_STATUS_IMAGE_INVALID    0x00000002U /* image missing or CRC mismatch */
+#define RECOVERY_STATUS_BOOT_UNCONFIRMED 0x00000003U /* app never proved it runs */
+#define RECOVERY_STATUS_NO_APP           0x00000004U /* nothing bootable in flash */
+
+/*---------------------------------------------------------------------------
  * Config struct magic
  *---------------------------------------------------------------------------*/
 
@@ -162,10 +193,26 @@ extern "C" {
 #pragma pack(push, 1)
 
 /**
- * @brief Configuration stored in the last two flash pages.
+ * @brief Boot configuration, stored as two ping-pong copies in the config pages.
  *
- * Written only on OTA transitions. Must be byte-identical across
- * bootloader and application compiles.
+ * Written only on OTA transitions and boot confirmation. Must be byte-identical
+ * across bootloader and application compiles — hence the static assertion on
+ * its size further down.
+ *
+ * `config_seq` is the ping-pong tiebreaker: `ota_config_write()` writes to the
+ * page that does *not* hold the newest valid copy, with `config_seq`
+ * incremented. A reader picks the valid copy with the highest sequence, so a
+ * power loss during a write leaves the other copy intact and authoritative.
+ *
+ * `boot_confirmed` is the durable half of the boot-verification contract:
+ *   ota_config_mark_valid(): set 0 — a freshly committed image has not run yet
+ *   application:             set 1 once it is demonstrably healthy
+ * The live half is a counter in the RTC backup registers, incremented by the
+ * bootloader on every boot and zeroed by the application when it confirms. It
+ * lives in the backup domain so a crash loop costs no flash erase cycles, and
+ * is lost on power-on — which is correct, since a power cycle is a fresh start.
+ * After BOOT_ATTEMPT_LIMIT consecutive unconfirmed boots the bootloader
+ * declares the image bad and opens the long recovery window.
  */
 typedef struct {
     uint32_t magic;             /* BOOT_CONFIG_MAGIC */
@@ -175,7 +222,10 @@ typedef struct {
     uint32_t image_size;        /* size of current firmware image in bytes */
     uint32_t image_crc32;       /* CRC-32 of current firmware image */
     uint32_t update_status;     /* UPDATE_STATUS_* */
-    uint32_t reserved[4];       /* future use */
+    uint32_t config_seq;        /* ping-pong sequence; higher wins */
+    uint32_t boot_confirmed;    /* 1 after the app proved it can run */
+    uint32_t boot_attempts;     /* consecutive unconfirmed boots */
+    uint32_t reserved[3];       /* future use */
     uint32_t cfg_crc32;         /* CRC-32 of all preceding fields */
 } BootConfig_t;
 
@@ -219,12 +269,12 @@ typedef struct {
 
 /* Statically verify sizes */
 #if defined(__cplusplus)
-static_assert(sizeof(BootConfig_t) == 48, "BootConfig_t size mismatch");
+static_assert(sizeof(BootConfig_t) == 56, "BootConfig_t size mismatch");
 static_assert(sizeof(SensorSnapshot_t) == 18,
               "SensorSnapshot_t size mismatch");
 static_assert(sizeof(DiagSnapshot_t) == 22, "DiagSnapshot_t size mismatch");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-_Static_assert(sizeof(BootConfig_t) == 48, "BootConfig_t size mismatch");
+_Static_assert(sizeof(BootConfig_t) == 56, "BootConfig_t size mismatch");
 _Static_assert(sizeof(SensorSnapshot_t) == 18,
                "SensorSnapshot_t size mismatch");
 _Static_assert(sizeof(DiagSnapshot_t) == 22,

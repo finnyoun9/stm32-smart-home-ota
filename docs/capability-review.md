@@ -116,7 +116,10 @@ WebSocket、原生 App、Node-RED、加湿器联动、更多传感器。`docs/re
 
 1. **OTA 掉电即砖（已知，README 已披露）。** 第一个 chunk 就擦除 app 第 0 页（含向量表），中断后 `app_is_valid()` 失败，设备停在 maintenance。**这是当前最大的可信度缺口**——因为它是唯一一个“本来可以做得更严谨、但没做”的点，而它恰好落在项目最核心的能力上。
 2. **配置区单副本无原子性兜底。** `ota_config_write()` 先擦除 `CONFIG_BASE` 再写；写入途中掉电 → magic/CRC 失效 → `ota_config_read()` 返回 false → 版本号与状态丢失（应用本身仍能启动）。配置区给了 2KB 却只用 1 页，属于“空间已付钱、冗余没买”。
-3. **协议实现存在镜像副本。** `shared/protocol.c` 与 `esp32-comm-bridge/src/protocol.cpp` 目前仅有注释差异（本次审查已 diff 确认），但 `esp32-comm-bridge/platformio.ini` 已经把这个同步风险写进注释。逻辑一旦漂移，就是最难查的一类 bug。这是一处“同一职责两个 owner”。
+3. ~~**协议实现存在镜像副本。**~~ **已解决（2026-09-17）。** 原状：`shared/protocol.c` 与
+   `esp32-comm-bridge/src/protocol.cpp` 是同一职责的两个 owner，仅靠注释提醒同步。现改为
+   `esp32-comm-bridge/components/shared_protocol/` 独立 IDF 组件直接用 C 编译器编译
+   `shared/protocol.c`，全仓库只剩一份实现；CI 断言副本不存在以防回归。
 4. **`app_is_valid()` 只校验 SP 与 reset vector。** 没有 image CRC 复核、没有“升级后首次启动确认”的概念，因此无法做无 A/B 的最小回滚（见第六节）。
 5. **MQTT 走公网明文 `mqtt://broker.emqx.io:1883` 且未实机验证。** 要么补 TLS + 去掉沙盒，要么在 README 里降到“实验分支”，不要与已验证能力并列。
 6. **RAM 余量仅约 2KB（17,900/20,480）。** 任何新功能都会先撞 RAM 而不是 Flash。这本身就是很值得讲的一条工程约束，但前提是先把 HighWaterMark/heap 统计常态化。
