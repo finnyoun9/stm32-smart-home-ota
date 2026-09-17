@@ -1,7 +1,7 @@
 # OTA 掉电恢复：可行性分析与方案选型
 
-> 状态：**方案 2 已选定并实现第 1–3 项**（2026-09-17）。第 4 项（ESP32 golden 镜像自动重推）待做。
-> 基线：构建实测 Flash 40,208 B / RAM 19,936 B（app）。
+> 状态：**方案 2 的第 1–4 项已全部实现**（2026-09-17）。实机故障注入待做。
+> 基线：构建实测 Flash 40,240 B / RAM 19,936 B（app），ESP32 Flash 1,411,685 B。
 > 结论先行：**64KB 单 Bank 上做不了完整 A/B**，因此采用「跨设备冗余 + 启动确认」。
 
 ---
@@ -13,13 +13,57 @@
 | config 双副本 ping-pong | `shared/ota_config.c`：每份配置占一整页（62/63），`config_seq` 决定胜负；写入永远擦「非最新」那一页 | `tools/ota_config_logic_test.c` 23/23 断言通过（含「写入中断后旧副本必须胜出」） |
 | 镜像 CRC 复核 | bootloader 用 `cfg.image_size`/`image_crc32` 重算 app 区 CRC，识别「传输了一半」的固件 | 编译通过；实机故障注入待做 |
 | 起始大小记录 | `CMD_OTA_AVAILABLE` payload 扩到 8B（version + size），app 在传输开始前就把期望大小写进 config | ESP32 侧已改并构建通过 |
-| 启动确认计数 | 实时计数存 `BKP_DR1`（掉电/复位下行为明确，**零 Flash 擦写**）；app 启动 3s 后 `ota_config_confirm_boot()` 清零 | 编译通过；实机待验 |
+| 启动确认计数 | 实时计数存 `BKP_DR1`（复位域保持，**零 Flash 擦写**）；app 启动 3s 后 `ota_config_confirm_boot()` 清零 | 编译通过；实机待验 |
 | 恢复窗口 | 判定镜像无效/未确认时，把 OTA 窗口从 200ms 延长到 10s 并常亮 LED | 编译通过 |
-| 恢复状态上报 | `CMD_STATUS_RSP` 返回 `RECOVERY_STATUS_*`，让主机区分「一切正常」与「我需要固件」 | 编译通过 |
+| 恢复状态上报 | 新增 `CMD_RECOVERY_CHECK`/`CMD_RECOVERY_RSP`（0x34/0x89）专用命令 | `tools/recovery_protocol_test.c` 237/237 断言通过 |
+| **golden 镜像 + 自动重推** | ESP32 在 SPIFFS 保留上一版已确认可用的镜像；传感器轮询连续失败 2 次即查询恢复状态，非 NORMAL 时自动重推 golden | 编译通过；实机故障注入待做 |
+
+### 自动恢复的完整时序
+
+```
+正常升级：
+  ESP32 暂存新镜像 → CMD_OTA_AVAILABLE(v+size) → app 记 size、置 OTA 标志、复位
+  → bootloader 擦写 → CRC 校验 → mark_valid（boot_confirmed=0）→ 跳转
+  → app 启动 3s 后 confirm_boot() + 发 CMD_OTA_COMMITTED
+  → ESP32 收到后 golden_promote(v)：这一版才成为回滚目标
+
+传输中途掉电：
+  上电 → bootloader 用 config 记录的 size/CRC 重算 app 区 → 不匹配
+  → RECOVERY_STATUS_IMAGE_INVALID，开 10s 窗口，不进坏镜像
+  → ESP32 轮询连续失败 2 次 → CMD_RECOVERY_CHECK → 拿到非 NORMAL
+  → golden_restore() 把上一版写回暂存槽 → 正常走一遍传输
+  → 设备自动回到上一版可用固件（无需 PC、无需线缆）
+
+新固件能启动但会崩：
+  app 起不来 → 看门狗复位 → BKP_DR1 计数 +1（零 Flash 擦写）
+  → 累计 > BOOT_ATTEMPT_LIMIT(3) → RECOVERY_STATUS_BOOT_UNCONFIRMED
+  → 同上自动回滚
+```
+
+### 两个开发中暴露、已修掉的设计问题
+
+1. **恢复状态与固件版本号撞车。** 最初让 bootloader 和 app 共用 `CMD_STATUS_RSP`：
+   bootloader 返回 `RECOVERY_STATUS_*`（1 = OTA_PENDING），app 返回固件版本号（1、2、3…）。
+   固件 v1 会被 ESP32 判成「需要恢复」，从而把一个健康设备刷回旧版。
+   现在恢复状态有专用命令 `CMD_RECOVERY_RSP`，并由 `recovery_protocol_test.c` 的
+   用例 02 钉住这个回归。
+2. **`transfer_to_stm32()` 的重入死锁。** 恢复流程从 `sensor_poll_task` 调用，
+   而该任务已持有 `g_ota_mutex`；公开的 `transfer_to_stm32()` 会再取同一把锁，
+   于是超时返回 false、恢复*永远不会真正执行*——而且日志上只看到一条泛泛的失败。
+   现在恢复路径直接调用 `transfer_to_stm32_impl()`。
 
 **为什么实时计数放 BKP 而不是 Flash**：崩溃循环每次启动都会计数，写 Flash 会让配置页在
 ~10k 次擦写后失效，而这恰好是崩溃循环最容易触发的场景。BKP 由复位域保持（看门狗/HardFault/
 `NVIC_SystemReset()` 都不会清），所以计数零成本；掉电会丢，但掉电本来就是全新开始。
+
+### 仍然存在的边界（不要夸大）
+
+- **恢复依赖 ESP32 在线。** 这是方案 2 的固有前提：STM32 单独无法自我恢复。
+  若 ESP32 也损坏或 SPIFFS 里从未存过 golden，仍需 ST-Link。
+- **从未成功升级过的设备没有 golden。** 首次 OTA 前 SPIFFS 里没有可回滚镜像，
+  此时中断传输只能停在 bootloader 的恢复窗口等待主机。
+- **golden 只保留一版。** 连续两次坏升级会覆盖掉更早的可用版本。
+- 以上全部为**编译级与主机模型级验证**，尚无实机故障注入证据。
 
 ---
 

@@ -98,6 +98,8 @@ extern "C" {
 #define CMD_RESET               0x31U
 #define CMD_GET_SENSOR_SNAPSHOT 0x32U  /* request latest app sensor state */
 #define CMD_DIAG_SNAPSHOT       0x33U  /* request cached runtime diagnostics */
+#define CMD_RECOVERY_CHECK      0x34U  /* "who is running, and do you need firmware?" */
+#define CMD_OTA_COMMITTED       0x35U  /* app: "version N booted and confirmed" */
 
 /* Slave → Master (STM32 → ESP32) */
 #define CMD_OTA_BEGIN_ACK       0x81U
@@ -108,6 +110,7 @@ extern "C" {
 #define CMD_OTA_READY           0x86U  /* app saved OTA request and will reboot */
 #define CMD_SENSOR_SNAPSHOT_RSP 0x87U
 #define CMD_DIAG_SNAPSHOT_RSP   0x88U
+#define CMD_RECOVERY_RSP        0x89U  /* RECOVERY_STATUS_* payload (4 bytes LE) */
 
 /* DiagSnapshot_t.stack_high_water[] index order (fixed across all builds) */
 #define DIAG_TASK_COUNT         4U

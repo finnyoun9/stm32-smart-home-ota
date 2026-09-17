@@ -651,6 +651,20 @@ void bootloader_run(void) {
 
         if (f != NULL && f->cmd == CMD_OTA_BEGIN) {
             process_ota_begin(f);
+        } else if (f != NULL && f->cmd == CMD_RECOVERY_CHECK) {
+            /* The host asks "who is running, and do you need firmware?".
+             * Answering from the bootloader means the application is not
+             * running, which is itself information. Uses its own command
+             * rather than CMD_STATUS_RSP, where the application answers with a
+             * firmware version number — the two would collide (app v1 vs
+             * RECOVERY_STATUS_OTA_PENDING). */
+            uart_send_frame(CMD_RECOVERY_RSP,
+                            (const uint8_t *)&g_recovery_status, 4);
+            /* Keep the recovery window open for the host to act on it. */
+            f = wait_for_frame(OTA_RECOVERY_WINDOW_MS);
+            if (f != NULL && f->cmd == CMD_OTA_BEGIN) {
+                process_ota_begin(f);
+            }
         } else if (f != NULL && f->cmd == CMD_GET_STATUS) {
             /* Host is polling — report why we are still here, then keep
              * waiting. A host that sees a non-NORMAL status should re-send the
@@ -743,6 +757,12 @@ void bootloader_run(void) {
                 case CMD_OTA_BEGIN:
                     process_ota_begin(f);
                     goto ota_active;
+                    break;
+                case CMD_RECOVERY_CHECK:
+                    /* Bootloader is running: the application is not. Report
+                     * why, so the host knows whether to re-send firmware. */
+                    uart_send_frame(CMD_RECOVERY_RSP,
+                                    (const uint8_t *)&g_recovery_status, 4);
                     break;
                 case CMD_GET_STATUS:
                     {

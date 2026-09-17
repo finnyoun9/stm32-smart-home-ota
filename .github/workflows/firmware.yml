@@ -93,3 +93,12 @@ jobs:
             tools/ota_config_logic_test.c shared/protocol.c \
             -o ota_config_logic_test
           ./ota_config_logic_test
+
+      # 恢复协议契约：恢复状态不得与 app 的固件版本号撞车（历史上撞过），
+      # 以及全部命令 ID 互不重复。
+      - name: Run recovery protocol contract test
+        run: |
+          gcc -std=c11 -Wall -Wextra -Werror -Ishared \
+            tools/recovery_protocol_test.c shared/protocol.c \
+            -o recovery_protocol_test
+          ./recovery_protocol_test

@@ -96,6 +96,16 @@ static const char *TAG = "bridge";
 
 /* SPIFFS firmware storage */
 #define FW_FILE_PATH            "/spiffs/fw.bin"
+
+/* The "golden" image: the last STM32 firmware this bridge saw boot and confirm.
+ *
+ * This is the other half of the STM32 boot-verification contract. A 64KB
+ * STM32F103 has no room for a second application slot (the image is ~39KB, and
+ * two slots would need 54KB of the 64KB flash), so the rollback copy lives here
+ * instead: the bridge keeps the last known-good image and re-sends it when the
+ * STM32 reports it needs firmware. Without this file, recovering from an
+ * interrupted transfer needs a PC and a cable. */
+#define GOLDEN_FILE_PATH        "/spiffs/golden.bin"
 #define FW_FILE_MAX_SIZE        (54 * 1024)  /* Max app size */
 #define STM32_APP_BASE          0x08002000U
 #define STM32_APP_END           0x0800F800U
@@ -212,6 +222,12 @@ static bool transfer_to_stm32(void);
 static bool stage_firmware_data(const uint8_t *data, size_t len);
 static bool verify_staged_firmware(void);
 static bool transfer_to_stm32_impl(void);
+static bool golden_promote(uint32_t version);
+static bool golden_restore(void);
+static uint32_t stm32_query_recovery_status(bool *answered, bool *committed_out,
+                                            uint32_t *committed_version,
+                                            uint32_t timeout_ms);
+static void recovery_control(bool *committed_out, uint32_t *committed_version);
 
 /*---------------------------------------------------------------------------
  * UART to STM32
@@ -299,10 +315,67 @@ static uint32_t bridge_uptime_ms(void) {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
+/**
+ * @brief Answer "does the STM32 need firmware?" and act on it.
+ *
+ * Called when the application stops answering sensor polls, which is what an
+ * interrupted OTA looks like from here: the application is gone (torn image,
+ * or an image that crash-loops) and the bootloader is holding the link open in
+ * its recovery window.
+ *
+ * A non-normal recovery status means the device is waiting for firmware, so the
+ * previously confirmed image is pushed back. That turns "needs a PC and a
+ * cable" into "recovers by itself".
+ *
+ * @param committed_out   Set when the application announced a confirmed boot.
+ * @param committed_version  Version reported by that announcement.
+ */
+static void recovery_control(bool *committed_out, uint32_t *committed_version) {
+    bool answered = false;
+
+    uint32_t status = stm32_query_recovery_status(&answered, committed_out,
+                                                  committed_version, 600);
+
+    if (status == RECOVERY_STATUS_NORMAL) {
+        return;
+    }
+
+    ESP_LOGW(TAG, "STM32 reports it needs firmware (recovery status %lu)%s",
+             (unsigned long)status,
+             answered ? "" : " [no reply parsed]");
+
+    if (g_ota_running) {
+        ESP_LOGW(TAG, "An OTA is already running; not starting a restore");
+        return;
+    }
+
+    if (!golden_restore()) {
+        ESP_LOGE(TAG, "Cannot restore: no usable golden image is stored");
+        return;
+    }
+
+    /* Call the implementation directly: this function is invoked from
+     * sensor_poll_task while it already holds g_ota_mutex, and the public
+     * transfer_to_stm32() wrapper takes that same mutex — calling it here would
+     * deadlock until it timed out and the restore would silently never run. */
+    g_ota_running = true;
+    bool ok = transfer_to_stm32_impl();
+    g_ota_running = false;
+
+    if (!ok) {
+        ESP_LOGE(TAG, "Golden restore transfer failed");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Golden restore completed");
+}
+
 static void sensor_poll_task(void *pv) {
     (void)pv;
     TickType_t last_wake = xTaskGetTickCount();
     uint32_t consecutive_failures = 0;
+    uint32_t committed_version = 0;
+    bool committed = false;
 
     for (;;) {
         SensorSnapshot_t snapshot = {};
@@ -341,6 +414,35 @@ static void sensor_poll_task(void *pv) {
                 ESP_LOGW(TAG, "STM32 sensor poll failed (%lu)",
                          consecutive_failures);
             }
+
+            /* Two failed polls means the application is not running. Ask why
+             * and recover if the bootloader says it needs firmware. Kept in
+             * the same task as the polling so there is still exactly one owner
+             * of the STM32 UART at a time. */
+            if (consecutive_failures == 2U) {
+                if (g_ota_mutex != NULL &&
+                    xSemaphoreTake(g_ota_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+                    recovery_control(&committed, &committed_version);
+                    xSemaphoreGive(g_ota_mutex);
+                }
+            }
+        }
+
+        if (committed) {
+            /* The application confirmed a boot, so the image it is running is
+             * now the best rollback target. Promote it here, where the version
+             * is known, rather than blindly after a transfer — a version that
+             * never boots is never adopted.
+             *
+             * Skipped while a transfer is in flight: the staging file is then
+             * the *next* image rather than the one that just confirmed. */
+            committed = false;
+            if (g_ota_running) {
+                ESP_LOGW(TAG, "Boot confirmation arrived during a transfer; "
+                              "deferring golden promotion");
+            } else {
+                golden_promote(committed_version);
+            }
         }
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SENSOR_POLL_PERIOD_MS));
@@ -364,6 +466,271 @@ static void spiffs_init(void) {
     size_t total = 0, used = 0;
     esp_spiffs_info(conf.partition_label, &total, &used);
     ESP_LOGI(TAG, "SPIFFS: total=%d, used=%d", total, used);
+}
+
+/*---------------------------------------------------------------------------
+ * Golden image — the rollback copy that lives on the bridge
+ *
+ * The STM32 cannot hold two application slots (see GOLDEN_FILE_PATH), so the
+ * "last version known to run" is kept here. Two operations matter:
+ *
+ *   golden_promote(version)  copy the just-staged image over the golden file,
+ *                            but only after that version has been observed
+ *                            running. A version that never boots is therefore
+ *                            never adopted as the rollback target.
+ *   golden_restore()         copy the golden file back into the staging slot so
+ *                            the normal transfer path can push it.
+ *---------------------------------------------------------------------------*/
+
+/** @return true when the storage partition plausibly has room for another image. */
+static bool spiffs_has_room_for_image(void) {
+    size_t total = 0;
+    size_t used = 0;
+
+    if (esp_spiffs_info("storage", &total, &used) != ESP_OK) {
+        return false;
+    }
+
+    /* Keep a margin so a promotion cannot consume the last free bytes and make
+     * the partition unusable for the staging file. */
+    const size_t required = FW_FILE_MAX_SIZE + (16U * 1024U);
+    if (used + required > total) {
+        ESP_LOGW(TAG, "SPIFFS too full to keep a golden image "
+                      "(total=%u used=%u need=%u)",
+                 (unsigned)total, (unsigned)used, (unsigned)required);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief Adopt the staged image as the rollback target.
+ *
+ * @param version  The version that was observed booting and confirming. Only
+ *                 recorded so the golden file can be described in logs.
+ */
+static bool golden_promote(uint32_t version) {
+    struct stat st;
+
+    if (stat(FW_FILE_PATH, &st) != 0 || st.st_size <= 0) {
+        ESP_LOGW(TAG, "No staged image to promote to golden");
+        return false;
+    }
+
+    if (!spiffs_has_room_for_image()) {
+        return false;
+    }
+
+    if (unlink(GOLDEN_FILE_PATH) != 0) {
+        ESP_LOGD(TAG, "No previous golden image to replace");
+    }
+
+    FILE *src = fopen(FW_FILE_PATH, "rb");
+    if (src == NULL) {
+        ESP_LOGE(TAG, "Cannot open staged image for promotion");
+        return false;
+    }
+
+    FILE *dst = fopen(GOLDEN_FILE_PATH, "wb");
+    if (dst == NULL) {
+        ESP_LOGE(TAG, "Cannot create golden image");
+        fclose(src);
+        return false;
+    }
+
+    /* Stream through a small fixed buffer: the image is ~39KB and there is no
+     * reason to duplicate it in RAM. */
+    uint8_t *buf = (uint8_t *)malloc(1024);
+    bool ok = (buf != NULL);
+    size_t total = 0;
+
+    while (ok) {
+        size_t n = fread(buf, 1, 1024, src);
+        if (n == 0) {
+            break;
+        }
+        if (fwrite(buf, 1, n, dst) != n) {
+            ok = false;
+            break;
+        }
+        total += n;
+    }
+
+    free(buf);
+    fclose(src);
+
+    if (fclose(dst) != 0) {
+        ok = false;
+    }
+
+    if (!ok || total != (size_t)st.st_size) {
+        ESP_LOGE(TAG, "Golden promotion failed (wrote %u of %u bytes)",
+                 (unsigned)total, (unsigned)st.st_size);
+        unlink(GOLDEN_FILE_PATH);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Golden image updated: version=%lu size=%u",
+             (unsigned long)version, (unsigned)total);
+    return true;
+}
+
+/**
+ * @brief Put the golden image back into the staging slot and make it transferable.
+ *
+ * The staging slot is what `transfer_to_stm32_impl()` sends, so restoring means
+ * copying the golden file over it and rebuilding the bookkeeping the transfer
+ * path verifies against. The CRC is recomputed during the copy rather than
+ * carried in the file, so the restored image can never disagree with the bytes
+ * that actually landed in SPIFFS.
+ *
+ * Caller must already hold g_ota_mutex.
+ */
+static bool golden_restore(void) {
+    struct stat st;
+
+    if (stat(GOLDEN_FILE_PATH, &st) != 0 || st.st_size <= 0) {
+        ESP_LOGW(TAG, "Recovery requested but no golden image is stored");
+        return false;
+    }
+
+    FILE *src = fopen(GOLDEN_FILE_PATH, "rb");
+    if (src == NULL) {
+        ESP_LOGE(TAG, "Cannot open golden image");
+        return false;
+    }
+
+    FILE *dst = fopen(FW_FILE_PATH, "wb");
+    if (dst == NULL) {
+        ESP_LOGE(TAG, "Cannot rewrite staging file");
+        fclose(src);
+        return false;
+    }
+
+    uint8_t *buf = (uint8_t *)malloc(1024);
+    bool ok = (buf != NULL);
+    size_t total = 0;
+    uint32_t crc = 0;
+
+    while (ok) {
+        size_t n = fread(buf, 1, 1024, src);
+        if (n == 0) {
+            break;
+        }
+        if (fwrite(buf, 1, n, dst) != n) {
+            ok = false;
+            break;
+        }
+        crc = proto_crc32(buf, n, crc);
+        total += n;
+    }
+
+    free(buf);
+    fclose(src);
+    if (fclose(dst) != 0) {
+        ok = false;
+    }
+
+    if (!ok || total != (size_t)st.st_size) {
+        ESP_LOGE(TAG, "Golden restore failed (wrote %u of %u bytes)",
+                 (unsigned)total, (unsigned)st.st_size);
+        unlink(FW_FILE_PATH);
+        return false;
+    }
+
+    /* Rebuild exactly the state a fresh upload would have left behind, so the
+     * restored image goes through the same verification as any other transfer.
+     * g_fw_version stays 0: the golden file was staged earlier and its version
+     * was not recorded. The STM32 does not care which version it receives, and
+     * the bridge learns the real one when the application announces it. */
+    g_fw_size          = (uint32_t)st.st_size;
+    g_fw_expected_size = g_fw_size;
+    g_fw_crc32         = crc;
+    g_fw_running_crc   = crc;
+    g_fw_staged        = true;
+
+    if (!verify_staged_firmware()) {
+        ESP_LOGE(TAG, "Restored golden image failed verification");
+        g_fw_staged = false;
+        return false;
+    }
+
+    ESP_LOGW(TAG, "Restoring golden image (%u bytes, CRC32=0x%08lX) to the STM32",
+             (unsigned)total, (unsigned long)crc);
+    return true;
+}
+
+/**
+ * @brief Ask the STM32 who is running and whether it needs firmware.
+ *
+ * The application and the bootloader both answer CMD_RECOVERY_CHECK. Only the
+ * bootloader can report anything other than RECOVERY_STATUS_NORMAL: if the
+ * application were running it would have answered RECOVERY_STATUS_NORMAL. So a
+ * non-normal answer means the link is currently owned by the bootloader and the
+ * device is waiting for firmware — exactly the condition this bridge exists to
+ * fix. They deliberately do not share CMD_STATUS_RSP, where the application
+ * answers with a firmware version number that would collide with these codes.
+ *
+ * @param answered      Set true when any reply was parsed (either side).
+ * @param committed_out Set when the reply was CMD_OTA_COMMITTED, i.e. the
+ *                      application announced a version that booted and
+ *                      confirmed. Callers use it to promote the golden image.
+ */
+static uint32_t stm32_query_recovery_status(bool *answered,
+                                            bool *committed_out,
+                                            uint32_t *committed_version,
+                                            uint32_t timeout_ms) {
+    if (answered != NULL) {
+        *answered = false;
+    }
+    if (committed_out != NULL) {
+        *committed_out = false;
+    }
+
+    ProtoParser_t parser;
+    proto_parser_init(&parser);
+
+    if (!stm32_send_frame(CMD_RECOVERY_CHECK, NULL, 0)) {
+        return RECOVERY_STATUS_NO_APP;
+    }
+
+    uint32_t start = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    uint8_t byte;
+
+    while ((xTaskGetTickCount() * portTICK_PERIOD_MS) - start < timeout_ms) {
+        int len = uart_read_bytes(UART_STM32_NUM, &byte, 1, pdMS_TO_TICKS(20));
+        if (len <= 0) {
+            continue;
+        }
+
+        const ProtoFrame_t *f = proto_parser_feed(&parser, byte);
+        if (f == NULL) {
+            continue;
+        }
+
+        if (answered != NULL) {
+            *answered = true;
+        }
+
+        if (f->cmd == CMD_RECOVERY_RSP && f->len >= 4) {
+            uint32_t status = 0;
+            memcpy(&status, f->payload, 4);
+            return status;
+        }
+
+        if (f->cmd == CMD_OTA_COMMITTED && f->len >= 4) {
+            /* Not the answer we asked for, but valuable: the application has
+             * just confirmed a boot. Record it rather than dropping it. */
+            if (committed_out != NULL) {
+                *committed_out = true;
+            }
+            if (committed_version != NULL) {
+                memcpy(committed_version, f->payload, 4);
+            }
+        }
+    }
+
+    return RECOVERY_STATUS_NORMAL;
 }
 
 /*---------------------------------------------------------------------------

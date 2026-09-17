@@ -263,6 +263,15 @@ static void vControlTask(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(BOOT_CONFIRM_DELAY_MS));
     if (!ota_config_confirm_boot()) {
         cmd_handler_send_frame(CMD_NAK, NULL, 0);
+    } else if (ota_config_read(&cfg)) {
+        /* Tell the bridge which version actually booted and confirmed. The
+         * bridge keeps a "golden" image of the last version known to run; this
+         * message is what lets it adopt the newly installed version instead of
+         * still treating the previous one as the rollback target. It is only
+         * sent after confirmation, so a version that never boots is never
+         * recorded as good. */
+        cmd_handler_send_frame(CMD_OTA_COMMITTED,
+                               (const uint8_t *)&cfg.fw_version, 4);
     }
 
     for (;;) {
@@ -899,6 +908,18 @@ void cmd_handler_dispatch(const ProtoFrame_t *f) {
             }
             xQueueSend(g_cmd_queue, &request, 0);
             xEventGroupSetBits(g_event_group, EVENT_OTA_AVAILABLE);
+        }
+        break;
+
+    case CMD_RECOVERY_CHECK:
+        {
+            /* The application is running, so by definition it does not need
+             * firmware re-sent. Answering this command at all is the signal:
+             * when the bootloader owns the link it answers CMD_RECOVERY_RSP
+             * instead, and never reaches here. */
+            uint32_t status = RECOVERY_STATUS_NORMAL;
+            cmd_handler_send_frame(CMD_RECOVERY_RSP,
+                                   (const uint8_t *)&status, 4);
         }
         break;
 

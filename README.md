@@ -45,9 +45,10 @@
 | 双路继电器 + 有源蜂鸣器 | **已真机验证** | PA2/PA3/PB1，蓝牙与 Web 均可控制 |
 | WS2812B 自动调光 | **已真机验证** | 逻辑分析仪 DOUT 证据，见[最大的难点](#项目最大的难点--biggest-technical-challenge) |
 | ESP32 Web 仪表盘 + `GET /api/sensors` | **已真机验证** | 1 秒刷新，18B 定点快照 |
-| Firmware CI（GitHub Actions） | **已跑通** | 三端固件构建 + 协议烟测自动执行 |
+| Firmware CI（GitHub Actions） | **已跑通** | 四目标固件构建 + 体积报告 + 4 个主机测试（协议烟测/边界矩阵/配置 ping-pong/恢复协议契约） |
 | MQTT（公共 EMQX 沙盒 broker） | **代码完成，待实机验证** | 编译通过，尚未接实机确认收发 |
 | ST7789 TFT 新版菜单/中英文切换 | **待实机验证** | 构建通过，未完成完整回归 |
+| OTA 掉电自动回滚（config 双副本 + 启动确认 + golden） | **代码完成，待实机故障注入** | 主机测试 260/260、237/237 通过；未做实机掉电验证 |
 
 完整的已验证/待验证记录见 [CHANGELOG.md](CHANGELOG.md)，求职版本收口计划见 [docs/resume-roadmap.md](docs/resume-roadmap.md)。`WebSocket` 和部分规划传感器（MPU6050/VL53L0X/DHT11/MQ-2/HC-SR04）仍是目标架构，**不作为已完成能力**。
 
@@ -398,9 +399,27 @@ stm32-smart-home-ota/
 - Bootloader 固定 8KB → 不能超出
 - Application 起始于 `0x08002000` → 必须设置 `SCB->VTOR`
 
-### 已知限制：OTA 传输中途掉电无回退
+### OTA 掉电恢复：从「掉电即砖」到「自动回滚」
 
-Bootloader 收到第一个 chunk 就会擦除 Application 区第 0 页（含中断向量表），所以 OTA 传输中途掉电会让旧固件立即失效：下次上电 `app_is_valid()` 判定应用无效，设备停在 Bootloader 的 maintenance 模式，需要重新完成一次 OTA 或用 ST-Link 重刷才能恢复。这是 64KB 单 Bank Flash、没有预留 A/B 分区空间的直接结果——生产级方案通常会先写暂存区、整体校验后再原子切换，但在 8KB Bootloader + 54KB Application 的预算下没有空间做这件事。建议 OTA 过程中保证电源稳定，避免中途拔线断电。
+> 状态：**代码与主机测试完成，实机故障注入待做**。设计与边界见 [docs/ota-recovery-design.md](docs/ota-recovery-design.md)。
+
+64KB 单 Bank Flash 装不下双槽 Application（镜像约 39KB，双槽需 54KB 以上），所以这里没有做
+传统 A/B，而是把回滚副本放到 **ESP32 侧**，配合 STM32 的启动确认构成跨设备冗余：
+
+| 机制 | 实现 |
+| --- | --- |
+| 配置区原子写 | 两份配置各占一整页（62/63）ping-pong，`config_seq` 定胜负；写入永远擦「非最新」那页，中断写入不丢配置 |
+| 识别半张镜像 | bootloader 用 config 记录的 `image_size`/`image_crc32` 重算 app 区 CRC，不再跳进必然崩溃的镜像 |
+| 启动确认 | 实时计数存 `BKP_DR1`（复位域保持、**零 Flash 擦写**）；app 启动 3s 后确认，连续 3 次未确认即判为坏镜像 |
+| 恢复窗口 | 判定镜像无效时 OTA 窗口 200ms → 10s 并常亮 LED，保持可被主机触达 |
+| 自动回滚 | ESP32 在 SPIFFS 保留上一版**已确认可运行**的镜像；轮询发现 STM32 报 `IMAGE_INVALID`/`BOOT_UNCONFIRMED` 即自动重推 |
+
+完整时序与「仍然存在的边界」（恢复依赖 ESP32 在线、首次升级前无 golden 可回滚、golden 只留一版）
+写在设计文档里，不在这里夸大。
+
+**历史方案说明**：早期版本收到第一个 chunk 就擦除 Application 第 0 页（含向量表），传输中途掉电会让
+旧固件立即失效、设备停在 maintenance 模式，需要重新 OTA 或用 ST-Link 重刷。上面这套机制就是为了消除
+这个失败模式。
 
 ## 文档索引
 
