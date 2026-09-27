@@ -3,6 +3,24 @@
  * @brief   Shared protocol implementation — CRC-32, frame parser, frame builder.
  *
  * Compiles into bootloader, application, and (with small adaption) ESP32 / PC tools.
+ *
+ * ===========================================================================
+ * 中文导读：这个文件是 protocol.h 契约的「唯一实现」
+ * ===========================================================================
+ * 只有 232 行，分三块，互相独立：
+ *   ① proto_crc32()        给数据算校验值（查表法）
+ *   ② proto_parser_feed()  把字节流还原成一帧（九状态机）
+ *   ③ proto_build_frame()  把一帧拼成字节流（组帧）
+ *
+ * 这三块**完全不碰硬件**：没有 HAL、没有 FreeRTOS、没有寄存器。
+ * 所以同一份源码被编进四个地方：
+ *   STM32 bootloader（arm-none-eabi-gcc）
+ *   STM32 应用（arm-none-eabi-gcc）
+ *   ESP32 网关（xtensa-esp32-elf-gcc，走 shared_protocol 组件）
+ *   PC 主机测试（clang/gcc，在 tools 目录下直接编）
+ * 这不是巧合，是刻意的分层 —— 把不依赖硬件的逻辑切出来，就能在电脑上
+ * 跑自动化测试，接进 CI，不用插板子。这是本项目最该会讲的一条设计。
+ * ===========================================================================
  */
 
 #include "protocol.h"
@@ -10,6 +28,41 @@
 /*---------------------------------------------------------------------------
  * CRC-32 lookup table (polynomial 0x04C11DB7, reflected)
  *---------------------------------------------------------------------------*/
+/* 中文：★ 256 项表是怎么来的，怎么用的 ★
+ *
+ * 【为什么是 256 项】
+ * 表的大小不由 CRC 的宽度（32 位）决定，而由「一次处理几位」决定。
+ * 这里一次吃 1 个字节 = 8 位，一个字节只有 256 种取值，
+ * 所以为这 256 种可能各预计算一个结果 → 256 项。
+ *   · 一次吃 4 位（半字节）→ 16 项表（省 Flash，慢一倍）
+ *   · 一次吃 16 位        → 65536 项表（不现实）
+ * 32 位只影响每项占几个字节：每项 4 字节，于是 256 × 4 = 1KB。
+ *
+ * 【表怎么生成的】等价于下面这段（原本是离线算好写死在这里的）：
+ *     for (int i = 0; i < 256; i++) {
+ *         uint32_t c = i;
+ *         for (int k = 0; k < 8; k++)
+ *             c = (c & 1) ? (c >> 1) ^ 0xEDB88320UL : (c >> 1);
+ *         table[i] = c;
+ *     }
+ * 含义：把「字节值 i 单独喂进 CRC 后对余数的贡献」预先算出来存好。
+ * 类比九九乘法表：7×8 可以连加 8 次算，也可以直接查表。
+ *
+ * 【表怎么用的】见 proto_crc32() 里那一行：
+ *     crc = crc32_table[(uint8_t)(crc ^ *data++)] ^ (crc >> 8);
+ *   第一步  crc ^ byte     把新字节异或进 CRC 的低 8 位
+ *   第二步  拿这 8 位当索引查表，得到"这 8 位会造成什么影响"
+ *   第三步  crc >> 8       右移 8 位，腾位置给下一个字节
+ *
+ * 【为什么是"反射"形式】硬件做串行 CRC 时数据从最低位先进移位寄存器。
+ * 为了软件结果跟硬件一致，整个算法都翻过来：多项式用 0x04C11DB7 的位反转
+ * 形式 0xEDB88320，表生成用右移，更新用 >> 8。网上抄来的 CRC 代码经常
+ * "算出来跟别人不一样"，八成就是反射/非反射混了。
+ *
+ * 【这段表曾经出过事】早期这份表和 ESP32 侧的副本里各有 4 个常量抄错，
+ * 而经典测试向量 "123456789" 恰好没走到那几个表项，所以测试全绿、代码是错的。
+ * 现在 tools/protocol_smoke_test.c 额外用 0x00..0xFF 全字节向量把 256 个
+ * 表项全覆盖。这就是"测试通过 ≠ 正确，只等于覆盖到的那部分正确"。 */
 
 static const uint32_t crc32_table[256] = {
     0x00000000U, 0x77073096U, 0xEE0E612CU, 0x990951BAU,
@@ -79,6 +132,13 @@ static const uint32_t crc32_table[256] = {
 };
 
 uint32_t proto_crc32(const uint8_t *data, size_t len, uint32_t crc) {
+    /* 中文：进函数先把 CRC 取反，出去前再取反 —— 这两步是"标准 CRC-32"
+     * 的参数之一（init 和 final xor 都是 0xFFFFFFFF）。
+     * 为什么要这样"取反进、取反出"：这样设计出来的 CRC 有两个好性质 ——
+     * ① 数据前面补任意多个 0 不影响结果；② 检测数据开头丢失的 0 更敏感。
+     * ★关键点★ 这种写法让函数可以"接着上次继续算"：传 0 表示从头开始，
+     * 传上一次的返回值就把新数据接在后面。OTA 校验整个固件就是这么一块
+     * 一块累加出来的，不用把 39KB 全读进内存。 */
     crc ^= 0xFFFFFFFFU;
     while (len--) {
         crc = crc32_table[(uint8_t)(crc ^ *data++)] ^ (crc >> 8);
@@ -100,10 +160,16 @@ void proto_parser_init(ProtoParser_t *p) {
     p->frame.cmd   = 0;
     p->frame.len   = 0;
 }
+/* 中文：★注意 calc_crc 初值不是 0，而是 0xFFFFFFFF★
+ * 因为解析器内部保存的是"还没做最终取反"的中间值（对应 proto_crc32() 里
+ * 第一步 crc ^= 0xFFFFFFFFU 之后的状态）。校验比对时才补上最终取反，见
+ * FRAME_STATE_CRC3 里的 final_crc。这个细节搞错，CRC 就会永远对不上。 */
 
 static void parser_update_crc(ProtoParser_t *p, uint8_t byte) {
     p->calc_crc = crc32_table[(uint8_t)(p->calc_crc ^ byte)] ^ (p->calc_crc >> 8);
 }
+/* 中文：边收边算 —— 每进一个字节就更新一次累加器，所以不需要先把整帧
+ * 缓存下来再算 CRC。这就是"流式解析"省内存的地方。 */
 
 const ProtoFrame_t *proto_parser_feed(ProtoParser_t *p, uint8_t byte) {
     switch (p->state) {
@@ -116,12 +182,18 @@ const ProtoFrame_t *proto_parser_feed(ProtoParser_t *p, uint8_t byte) {
         }
         /* else: stay in SYNC, skip byte */
         break;
+        /* 中文：这就是"重新同步"。不是 0xA5 的字节直接丢掉 —— 所以线上
+         * 多出来的垃圾数据（比如上电瞬间的噪声）会被自动跳过，不需要
+         * 额外的握手。注意进来先调一次 init()，把上一次的半截帧彻底清空。 */
 
     case FRAME_STATE_CMD:
         p->frame.cmd = byte;
         parser_update_crc(p, byte);
         p->state = FRAME_STATE_LEN_LO;
         break;
+        /* 中文：命令字原样收下，不在这里校验合法性。未知命令由更上层的
+         * cmd_handler_dispatch() 回 NAK + ERR_UNKNOWN_CMD。分层原则：
+         * 解析器只管"字节结构对不对"，不管"语义认不认识"。 */
 
     case FRAME_STATE_LEN_LO:
         p->frame.len = byte;
@@ -146,6 +218,14 @@ const ProtoFrame_t *proto_parser_feed(ProtoParser_t *p, uint8_t byte) {
             p->state = FRAME_STATE_DATA;
         }
         break;
+        /* 中文：★安全关键的一步★ 长度拼完（低字节在前 = 小端）立刻检查，
+         * 超长马上回到 SYNC，绝不进入 DATA 状态。
+         * 为什么在这里查而不是收完再查：如果先收再查，payload 数组早就被
+         * 写越界了 —— 那是一个可被远程触发的内存破坏漏洞。
+         * 先验证、后写入，顺序不能反。测试用例：tools/protocol_boundary_test.c
+         * 里用 0xFFFF 长度专门打这个点，断言不会越界写。
+         * 另外注意 len == 0 的处理：没有 payload 就直接跳到收 CRC，
+         * 不能进 DATA（否则 payload_idx >= 0 立刻成立，会多读字节）。 */
 
     case FRAME_STATE_DATA:
         p->frame.payload[p->payload_idx++] = byte;
@@ -155,6 +235,8 @@ const ProtoFrame_t *proto_parser_feed(ProtoParser_t *p, uint8_t byte) {
             p->state = FRAME_STATE_CRC0;
         }
         break;
+        /* 中文：payload 收够 len 个才前进。因为前面已经保证 len ≤ 1028，
+         * 这里写 payload[payload_idx] 不可能越界。 */
 
     case FRAME_STATE_CRC0:
         p->rx_crc  = byte;
@@ -170,6 +252,8 @@ const ProtoFrame_t *proto_parser_feed(ProtoParser_t *p, uint8_t byte) {
         p->rx_crc |= ((uint32_t)byte << 16);
         p->state   = FRAME_STATE_CRC3;
         break;
+        /* 中文：CRC 是 4 字节小端，所以第一个收到的字节放最低位。
+         * 这里正好是上面组帧时"低字节先写"的逆过程。 */
 
     case FRAME_STATE_CRC3: {
         /* Case body braced so this compiles as C and C++ (the local below
@@ -187,6 +271,14 @@ const ProtoFrame_t *proto_parser_feed(ProtoParser_t *p, uint8_t byte) {
         /* CRC mismatch — frame silently dropped */
         break;
     }
+        /* 中文：★整个解析器只有这一个地方会返回非 NULL★
+         * 必须收完第 4 个 CRC 字节才能比对 —— 这就是为什么 CRC 放在帧尾，
+         * 也是为什么前面所有次调用都返回 NULL。换句话说：
+         *   返回 NULL ≠ 出错，只表示"还没凑齐一帧"或"这帧坏了"。
+         * 校验失败时静默丢弃、不重传：链路层只负责"认出边界、扔掉坏帧"，
+         * 可靠性由上层（OTA 的序号 ACK + 超时重试）保证。两层职责清晰。
+         * 上面那句 C++ 兼容注释也很实在：C++ 不允许 case 标签跨过变量
+         * 初始化，所以整个 case 体要加花括号。 */
 
     default:
         p->state = FRAME_STATE_SYNC;
@@ -199,9 +291,15 @@ const ProtoFrame_t *proto_parser_feed(ProtoParser_t *p, uint8_t byte) {
 /*---------------------------------------------------------------------------
  * Frame builder
  *---------------------------------------------------------------------------*/
+/* 中文：组帧 = 解析的反向操作。把 cmd + payload 拼成
+ *   [0xA5][CMD][LEN_L][LEN_H][payload][CRC32 小端]
+ * 输出缓冲区由调用方提供（buf/buf_size），函数自己不分配内存 —— 这样
+ * PC 上可以用栈数组，MCU 上用固定全局数组，同一份代码两边都能跑。 */
 
 uint16_t proto_build_frame(uint8_t *buf, uint16_t buf_size,
                            uint8_t cmd, const uint8_t *payload, uint16_t len) {
+    /* 中文：两道前置检查，任一不过就返回 0（"什么都没写"）。
+     * 调用方必须检查返回值 —— 不检查就等于把"没发出去"当成"发出去了"。 */
     if (len > PROTO_MAX_PAYLOAD) return 0;
 
     uint16_t total = PROTO_HEADER_SIZE + len + PROTO_CRC_SIZE;
@@ -211,8 +309,8 @@ uint16_t proto_build_frame(uint8_t *buf, uint16_t buf_size,
     uint16_t idx = 0;
     buf[idx++] = PROTO_SYNC_BYTE;
     buf[idx++] = cmd;
-    buf[idx++] = (uint8_t)(len & 0xFF);
-    buf[idx++] = (uint8_t)((len >> 8) & 0xFF);
+    buf[idx++] = (uint8_t)(len & 0xFF);        /* 中文：长度低字节在前 */
+    buf[idx++] = (uint8_t)((len >> 8) & 0xFF); /* 中文：长度高字节在后 → 小端 */
 
     /* Payload */
     if (len > 0 && payload != NULL) {
@@ -222,6 +320,11 @@ uint16_t proto_build_frame(uint8_t *buf, uint16_t buf_size,
     }
 
     /* CRC-32 (little-endian) over header + payload */
+    /* 中文：★CRC 覆盖范围 = 头部 4 字节 + payload，不包含 CRC 自己★
+     * 这是唯一合理的做法：算 CRC 时还不知道 CRC 是多少。
+     * 收包侧（parser_update_crc）正好对应 —— 从 0xA5 开始一路累加，
+     * 到进入 CRC0 状态前停手，覆盖的字节完全一致。两边任何一边多算或
+     * 少算一个字节，所有帧都会校验失败，而且很难看出原因。 */
     uint32_t crc = proto_crc32_buf(buf, idx);
     buf[idx++] = (uint8_t)(crc & 0xFF);
     buf[idx++] = (uint8_t)((crc >> 8) & 0xFF);
@@ -230,3 +333,5 @@ uint16_t proto_build_frame(uint8_t *buf, uint16_t buf_size,
 
     return idx;
 }
+/* 中文：返回值是实际写入的字节数（= 4 + len + 4），调用方拿它当"要发多少
+ * 字节给串口"的长度用。 */
